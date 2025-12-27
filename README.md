@@ -103,38 +103,80 @@ flowchart TB
 
 ```
 dia-agent-platform/
-├─ apps/                     # UI 레이어
+├─ README.md
+├─ requirements.txt
+├─ requirements.lock.txt         # 해커톤은 lock파일 권장
+├─ .env.example
+├─ .gitignore
+
+├─ apps/                         # UI 레이어 (Chainlit)
 │  └─ chainlit_app/
-│     ├─ app.py              # Chainlit entrypoint
-│     └─ ui/                 # UI 공통 컴포넌트
-│
-├─ core/                     # 플랫폼 공통 영역 (재사용)
-│  ├─ agent/                 # Agent 실행/등록/런타임
-│  ├─ graph/                 # GraphState / 이벤트 정의
-│  ├─ llm/                   # LLM 클라이언트 및 모델 정책
-│  ├─ tools/                 # 공통 도구(File, 분석, 시각화 등)
-│  ├─ artifacts/             # 산출물 저장 및 메타 관리
-│  ├─ config/                # 설정 및 로깅
-│  └─ utils/                 # 공통 유틸
-│
-├─ agents/                   # Agent 플러그인 영역
-│  └─ dia/                   # DIA Agent
-│     ├─ agent.py            # BaseAgent 구현
-│     ├─ graph.py            # LangGraph 구성
-│     ├─ prompts/            # Planner / Executor / Reviewer 프롬프트
+│     ├─ app.py                  # Chainlit entrypoint
+│     └─ ui/
+│        ├─ render.py             # 메시지/아티팩트 렌더
+│        ├─ steps.py              # Agent Step/Trace 시각화
+│        └─ upload.py             # 파일 업로드 처리
+
+├─ core/                         # 플랫폼 공통 영역 (재사용 100%)
+│  ├─ agent/
+│  │  ├─ base.py                 # BaseAgent 인터페이스
+│  │  ├─ registry.py             # Agent 등록/조회
+│  │  └─ runner.py               # Agent 실행/스트리밍
+│  │
+│  ├─ graph/
+│  │  ├─ state.py                # GraphState 정의
+│  │  └─ events.py               # trace 이벤트 스키마
+│  │
+│  ├─ llm/
+│  │  ├─ client.py               # LangChain LLM 클라이언트(OpenRouter)
+│  │  ├─ models.py               # 모델 정책(primary/fallback)
+│  │  └─ prompts.py              # 프롬프트 로더
+│  │
+│  ├─ tools/
+│  │  ├─ base.py                 # Tool 스키마/공통 유틸
+│  │  ├─ file_loader.py          # CSV/XLSX/PDF 로더
+│  │  ├─ rag_faiss.py            # FAISS 인덱싱/검색
+│  │  ├─ data_analysis.py        # pandas 분석
+│  │  ├─ plotting.py             # matplotlib 렌더 + 파일 저장
+│  │  └─ report_writer.py        # markdown 보고서 생성
+│  │
+│  ├─ artifacts/
+│  │  ├─ store.py                # 산출물 저장
+│  │  └─ types.py                # Artifact 타입
+│  │
+│  ├─ config/
+│  │  ├─ settings.py             # 환경 설정
+│  │  └─ logging.py              # 로깅 설정
+│  │
+│  └─ utils/
+│     ├─ fs.py                   # 경로/파일 유틸
+│     └─ time.py                 # timestamp 유틸
+
+├─ agents/                       # Agent 플러그인 영역
+│  ├─ dia/
+│  │  ├─ agent.py                # DIA Agent 구현
+│  │  ├─ graph.py                # LangGraph 구성(Planner/Executor/Reviewer)
+│  │  ├─ tools.py                # (선택) 전용 Tool
+│  │  ├─ schemas.py              # (선택) 확장 State
+│  │  ├─ prompts/
+│  │  │  ├─ planner.md
+│  │  │  ├─ executor.md
+│  │  │  └─ reviewer.md
+│  │  └─ README.md               # agent 설명/데모 시나리오
+│  │
+│  └─ logcop/                    # (예시) 로그 분석 Agent 추가 시
+│     ├─ agent.py
+│     ├─ graph.py
+│     ├─ prompts/...
 │     └─ README.md
-│
-├─ workspace/                # 런타임 생성 파일 (git 제외)
+
+├─ workspace/                    # 런타임 데이터 (git 제외)
 │  ├─ uploads/
 │  ├─ artifacts/
 │  ├─ indexes/
 │  ├─ traces/
 │  └─ logs/
-│
-├─ requirements.txt
-├─ requirements.lock.txt     # 해커톤/재현 환경 고정
-├─ .env.example
-└─ README.md
+
 ```
 
 ### 구조 설계 의도

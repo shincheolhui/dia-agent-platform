@@ -12,7 +12,9 @@ from core.utils.fs import ensure_dir, safe_filename
 from core.utils.time import ts
 from core.llm.client import LLMClient
 from core.llm.prompts import load_prompt, default_insight_prompt
+from core.llm.validators import ensure_sections
 from agents.dia.report import ReportInputs, build_markdown_report
+from agents.dia.insights import rule_based_insights
 
 
 def _artifact_dir(settings: Any) -> Path:
@@ -61,6 +63,22 @@ def _detect_kind(file_path: str) -> str:
     if ext == ".pdf":
         return "pdf"
     return "unknown"
+
+
+def _summarize_numeric(df: pd.DataFrame) -> str:
+    num = df.select_dtypes(include="number")
+    if num.empty:
+        return "(숫자 컬럼 없음)"
+    desc = num.describe().T  # columns: count, mean, std, min, 25%, 50%, 75%, max
+    # 소수점 정리
+    desc = desc.round(3)
+    lines = []
+    for col in desc.index:
+        row = desc.loc[col]
+        lines.append(
+            f"- {col}: mean={row['mean']}, std={row['std']}, min={row['min']}, p50={row['50%']}, max={row['max']}"
+        )
+    return "\n".join(lines)
 
 
 async def run_dia_graph(user_message: str, context: Dict[str, Any], settings: Any):
@@ -119,18 +137,28 @@ async def run_dia_graph(user_message: str, context: Dict[str, Any], settings: An
                 except Exception:
                     system_prompt = default_insight_prompt()
 
+                numeric_summary = _summarize_numeric(df)
+
                 user_prompt = (
                     f"[사용자 요청]\n{user_message}\n\n"
                     f"[데이터 개요]\n"
                     f"- file: {f0['name']}\n"
-                    f"- shape: {df.shape[0]} x {df.shape[1]}\n\n"
-                    f"[describe() 요약]\n{desc}\n\n"
+                    f"- shape: {df.shape[0]} x {df.shape[1]}\n"
+                    f"- columns: {', '.join(map(str, df.columns.tolist()))}\n\n"
+                    f"[숫자 컬럼 요약]\n{numeric_summary}\n\n"
+                    f"[상위 10행]\n{df.head(10).to_csv(index=False)}\n\n"
                     f"[그래프]\n"
                     f"- plot_file: {plot_path.name if plot_path else '(none)'}\n"
                 )
 
                 llm_res = await llm_client.generate(system_prompt=system_prompt, user_prompt=user_prompt)
-                llm_section = llm_res.content
+
+                if llm_res.ok:
+                    llm_section = ensure_sections(llm_res.content)
+                else:
+                    # Key 없을 때도 유의미한 인사이트 제공
+                    llm_section = rule_based_insights(df)
+                    llm_note = llm_res.content  # "(LLM 비활성...)" 같은 짧은 표식
 
                 s2.output = (
                     f"CSV 파일을 로드했습니다.\n"
@@ -224,11 +252,16 @@ async def run_dia_graph(user_message: str, context: Dict[str, Any], settings: An
     if "plot_path" in locals() and plot_path is not None:
         plot_note = f"\n- 생성 그래프: {plot_path.name}"
 
+    llm_hint = ""
+    if not llm_res.ok and llm_res.error == "missing_api_key":
+        llm_hint = "\n- 참고: OPENROUTER_API_KEY 설정 시 LLM 기반 인사이트가 자동 생성됩니다."
+
     final_text = (
         "DIA Agent 실행 완료입니다.\n\n"
         f"- 요청: {user_message}\n"
-        f"- 생성 아티팩트: {artifact_md.name}\n\n"
-        f"{plot_note}\n\n"
+        f"- 생성 아티팩트: {artifact_md.name}\n"
+        f"{plot_note}\n"
+        f"{llm_hint}\n\n"
         "아래 파일 버튼으로 결과를 다운로드할 수 있습니다."
     )
     return {"text": final_text, "elements": elements}

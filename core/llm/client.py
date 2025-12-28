@@ -69,4 +69,9 @@ class LLMClient:
             except Exception as e:
                 last_err = f"{type(e).__name__}: {e}"
 
-        return LLMResult(ok=False, content="LLM 호출에 실패했습니다.", model=self.policy.fallback, error=last_err)
+        return LLMResult(
+            ok=False,
+            content="(LLM 비활성: OPENROUTER_API_KEY 미설정)",
+            model="none",
+            error="missing_api_key",
+        )

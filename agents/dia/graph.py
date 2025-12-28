@@ -10,6 +10,9 @@ import matplotlib.pyplot as plt
 
 from core.utils.fs import ensure_dir, safe_filename
 from core.utils.time import ts
+from core.llm.client import LLMClient
+from core.llm.prompts import load_prompt, default_insight_prompt
+from agents.dia.report import ReportInputs, build_markdown_report
 
 
 def _artifact_dir(settings: Any) -> Path:
@@ -104,6 +107,30 @@ async def run_dia_graph(user_message: str, context: Dict[str, Any], settings: An
                 df = pd.read_csv(file_path)
                 head = df.head(10).to_markdown(index=False)
                 desc = df.describe(include="all").to_markdown()
+                plot_path = _save_line_plot(settings, df, title=f"dia_csv_plot_{Path(file_path).stem}")
+
+                # --- LLM 인사이트 생성 (Key 없으면 안전 폴백 메시지 반환) ---
+                llm_client = LLMClient(settings)
+
+                # 프롬프트는 파일 기반을 우선 사용, 없으면 기본 프롬프트 사용
+                prompt_path = "agents/dia/prompts/insight.md"
+                try:
+                    system_prompt = load_prompt(prompt_path)
+                except Exception:
+                    system_prompt = default_insight_prompt()
+
+                user_prompt = (
+                    f"[사용자 요청]\n{user_message}\n\n"
+                    f"[데이터 개요]\n"
+                    f"- file: {f0['name']}\n"
+                    f"- shape: {df.shape[0]} x {df.shape[1]}\n\n"
+                    f"[describe() 요약]\n{desc}\n\n"
+                    f"[그래프]\n"
+                    f"- plot_file: {plot_path.name if plot_path else '(none)'}\n"
+                )
+
+                llm_res = await llm_client.generate(system_prompt=system_prompt, user_prompt=user_prompt)
+                llm_section = llm_res.content
 
                 s2.output = (
                     f"CSV 파일을 로드했습니다.\n"
@@ -112,19 +139,24 @@ async def run_dia_graph(user_message: str, context: Dict[str, Any], settings: An
                     "상위 10행과 describe() 요약을 생성합니다."
                 )
 
+                report_md = build_markdown_report(
+                    ReportInputs(
+                        user_request=user_message,
+                        file_name=f0["name"],
+                        file_path=file_path,
+                        shape=f"{df.shape[0]} x {df.shape[1]}",
+                        head_md=head,
+                        describe_md=desc,
+                        plot_file=(plot_path.name if plot_path else None),
+                        llm_insights_md=llm_section,
+                    )
+                )
+
                 artifact_md = _save_artifact_markdown(
                     settings,
                     title=f"dia_csv_report_{Path(file_path).stem}",
-                    body=(
-                        f"# DIA 분석 결과 (CSV)\n\n"
-                        f"## 요청\n{user_message}\n\n"
-                        f"## 파일\n- name: {f0['name']}\n- path: {file_path}\n\n"
-                        f"## 상위 10행\n{head}\n\n"
-                        f"## describe()\n{desc}\n"
-                    ),
+                    body=report_md,
                 )
-
-                plot_path = _save_line_plot(settings, df, title=f"dia_csv_plot_{Path(file_path).stem}")
 
             elif kind == "pdf":
                 text = ""

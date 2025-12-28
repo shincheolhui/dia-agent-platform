@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -15,6 +16,8 @@ class Settings(BaseSettings):
     # Model policy (string ids used by provider)
     PRIMARY_MODEL: str = "anthropic/claude-3.5-sonnet"
     FALLBACK_MODEL: str = "openai/gpt-4o-mini"
+    LLM_TEMPERATURE: float = Field(default=0.2)
+    LLM_TIMEOUT_SEC: int = Field(default=60)
 
     # Workspace
     WORKSPACE_DIR: str = "workspace"

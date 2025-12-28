@@ -1,0 +1,39 @@
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Optional
+
+
+def load_prompt(path: str) -> str:
+    p = Path(path)
+    return p.read_text(encoding="utf-8")
+
+
+def default_insight_prompt() -> str:
+    """
+    CSV/PDF 분석 결과를 기반으로 '업무용 보고서' 문장을 생성하는 기본 프롬프트.
+    (향후 agents/dia/prompts 로 분리 가능)
+    """
+    return """당신은 기업 환경에서 일하는 데이터 분석 컨설턴트입니다.
+    아래 입력(데이터 요약/그래프 설명/사용자 요청)을 기반으로, 과장 없이 정확한 '보고서 문구'를 생성하세요.
+
+    출력은 반드시 한국어로 작성하고, 아래 형식을 정확히 지키세요.
+
+    [출력 형식]
+    ## 요약
+    - (불릿 3개)
+
+    ## 인사이트
+    - (불릿 3~5개, 수치/패턴 중심)
+
+    ## 권장 액션
+    - (불릿 3개, 실행 가능한 형태)
+
+    ## 주의사항
+    - (불릿 1~3개, 데이터 한계/추가 확인 필요 사항)
+
+    [작성 규칙]
+    - 데이터가 부족하면 추측하지 말고 '추가 데이터 필요'라고 명시
+    - 단정적 표현을 피하고 근거(수치/관측)를 함께 제시
+    - 사내 보고서 톤(간결, 객관) 유지
+    """

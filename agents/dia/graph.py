@@ -6,6 +6,7 @@ from typing import Any, Dict, List
 import chainlit as cl
 import pandas as pd
 import pdfplumber
+import matplotlib.pyplot as plt
 
 from core.utils.fs import ensure_dir, safe_filename
 from core.utils.time import ts
@@ -20,6 +21,33 @@ def _save_artifact_markdown(settings: Any, title: str, body: str) -> Path:
     filename = f"{ts()}__{safe_filename(title)}.md"
     out_path = out_dir / filename
     out_path.write_text(body, encoding="utf-8")
+    return out_path
+
+
+def _save_line_plot(settings: Any, df: pd.DataFrame, title: str) -> Path | None:
+    """
+    숫자 컬럼을 자동 선택하여 라인 차트 1장을 생성하고 PNG로 저장.
+    반환: 생성된 이미지 경로 (없으면 None)
+    """
+    num_df = df.select_dtypes(include="number")
+    if num_df.empty:
+        return None
+
+    # 너무 많은 컬럼이면 앞의 2개만 사용 (안정성/가독성)
+    cols = list(num_df.columns)[:2]
+    plot_df = num_df[cols].head(200)  # 너무 길면 payload/시간 증가 → 상위 200행만
+
+    out_dir = ensure_dir(_artifact_dir(settings))
+    filename = f"{ts()}__{safe_filename(title)}.png"
+    out_path = out_dir / filename
+
+    plt.figure()
+    plot_df.plot()
+    plt.title(title)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=150)
+    plt.close()
+
     return out_path
 
 
@@ -96,6 +124,8 @@ async def run_dia_graph(user_message: str, context: Dict[str, Any], settings: An
                     ),
                 )
 
+                plot_path = _save_line_plot(settings, df, title=f"dia_csv_plot_{Path(file_path).stem}")
+
             elif kind == "pdf":
                 text = ""
                 with pdfplumber.open(file_path) as pdf:
@@ -145,17 +175,28 @@ async def run_dia_graph(user_message: str, context: Dict[str, Any], settings: An
 
     # 4) 최종 응답 + 다운로드 버튼
     elements = [
-        cl.File(
-            name=artifact_md.name,
-            path=str(artifact_md),
-            display="inline",
+        cl.File(name=artifact_md.name, path=str(artifact_md), display="inline"),
+    ]
+
+    # 그래프가 생성된 경우: 이미지 미리보기 + 다운로드 제공
+    if "plot_path" in locals() and plot_path is not None:
+        elements.append(
+            cl.Image(
+                name=plot_path.name,
+                path=str(plot_path),
+                display="inline",
+            )
         )
-    ]  # File element로 다운로드 버튼 제공 :contentReference[oaicite:1]{index=1}
+
+    plot_note = ""
+    if "plot_path" in locals() and plot_path is not None:
+        plot_note = f"\n- 생성 그래프: {plot_path.name}"
 
     final_text = (
         "DIA Agent 실행 완료입니다.\n\n"
         f"- 요청: {user_message}\n"
         f"- 생성 아티팩트: {artifact_md.name}\n\n"
+        f"{plot_note}\n\n"
         "아래 파일 버튼으로 결과를 다운로드할 수 있습니다."
     )
     return {"text": final_text, "elements": elements}

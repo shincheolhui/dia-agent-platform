@@ -11,6 +11,9 @@ workspace/logs/
 workspace/traces/
 workspace/uploads/
 
+# Chainlit
+.chainlit/
+
 # OS/IDE
 .DS_Store
 Thumbs.db

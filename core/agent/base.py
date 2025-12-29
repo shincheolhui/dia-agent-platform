@@ -1,19 +1,17 @@
+# core/agent/base.py
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Protocol
+from abc import ABC, abstractmethod
+from typing import Any, Dict, Optional
+
+from core.artifacts.types import AgentResult
 
 
-@dataclass(frozen=True)
-class AgentMeta:
-    agent_id: str
+class BaseAgent(ABC):
+    id: str
     name: str
     description: str
 
-
-class BaseAgent(Protocol):
-    meta: AgentMeta
-
-    def build(self, settings: Any) -> Any:
-        """Return an executable agent runner (callable/graph/etc.)."""
-        ...
+    @abstractmethod
+    async def run(self, user_message: str, context: Optional[Dict[str, Any]], settings: Any) -> AgentResult:
+        raise NotImplementedError

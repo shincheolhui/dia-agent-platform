@@ -1,3 +1,4 @@
+# apps/chainlit_app/ui/upload.py
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -48,3 +49,22 @@ async def handle_spontaneous_uploads(message: cl.Message, settings: Settings) ->
         uploaded.append(UploadedFile(name=safe_name, path=str(dst_path), mime=mime))
 
     return uploaded
+
+
+async def handle_uploads(message: cl.Message, settings: Settings):
+    """
+    app.py에서 호출하는 표준 업로드 진입점
+    - 내부적으로 handle_spontaneous_uploads를 사용
+    - 반환 타입은 Agent/Core가 소비 가능한 dict 구조
+    """
+    files = await handle_spontaneous_uploads(message, settings)
+
+    # Agent/Core가 Chainlit/Dataclass를 몰라도 되도록 dict로 변환
+    return [
+        {
+            "name": f.name,
+            "path": f.path,
+            "mime": f.mime,
+        }
+        for f in files
+    ]

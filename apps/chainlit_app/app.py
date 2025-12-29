@@ -1,53 +1,49 @@
+# apps/chainlit_app/app.py
 from __future__ import annotations
+
+from typing import Any, Dict, List
 
 import chainlit as cl
 
 from core.config.settings import get_settings
-from core.agent.registry import load_agent
-from apps.chainlit_app.ui.render import render_text
-from apps.chainlit_app.ui.upload import handle_spontaneous_uploads
+from core.agent.registry import AgentRegistry
+from core.routing.router import Router
+from core.agent.runner import AgentRunner
+
+from agents.dia.agent import DIAAgent
+from apps.chainlit_app.ui.upload import handle_uploads  # 기존 업로드 처리 사용
+from apps.chainlit_app.ui.render import render_result
+
+
+def build_registry() -> AgentRegistry:
+    reg = AgentRegistry()
+    reg.register(DIAAgent())
+    # reg.register(LogCopAgent())  # 추후 추가
+    return reg
 
 
 @cl.on_chat_start
 async def on_chat_start():
-    settings = get_settings()
-    cl.user_session.set("settings", settings)
-
-    agent = load_agent(settings.ACTIVE_AGENT)
-    runner = agent.build(settings)
-
-    cl.user_session.set("agent_meta", agent.meta)
-    cl.user_session.set("runner", runner)
-    cl.user_session.set("uploaded_files", [])
-
-    await render_text(
-        f"✅ {agent.meta.name} 준비 완료\n"
-        f"- agent_id: {agent.meta.agent_id}\n"
-        f"- description: {agent.meta.description}\n\n"
-        "메시지에 파일(CSV/PDF)을 첨부하면 Executor가 실제 분석을 수행하고\n"
-        "결과 아티팩트를 생성합니다."
-    )
+    await cl.Message(content="DIA Agent Platform 준비 완료. 파일을 업로드하고 요청을 입력하세요.").send()
 
 
 @cl.on_message
 async def on_message(message: cl.Message):
-    settings = cl.user_session.get("settings")
-    runner = cl.user_session.get("runner")
+    settings = get_settings()
 
-    # 1) 사용자가 메시지에 첨부한 파일을 workspace/uploads로 복사 저장
-    new_files = await handle_spontaneous_uploads(message, settings)
-    if new_files:
-        prev = cl.user_session.get("uploaded_files") or []
-        prev.extend([f.__dict__ for f in new_files])
-        cl.user_session.set("uploaded_files", prev)
+    # 1) 업로드 처리 (context 구성)
+    uploaded_files: List[Dict[str, Any]] = await handle_uploads(message, settings)
+    context = {"uploaded_files": uploaded_files}
 
-    # 2) Agent 실행 시 context로 업로드 파일 목록 전달
-    context = {"uploaded_files": cl.user_session.get("uploaded_files") or []}
+    # 2) 자동 라우팅 → agent 선택
+    registry = build_registry()
+    router = Router(registry)
+    agent_id = router.pick_agent_id(user_message=message.content, context=context)
+    agent = registry.get(agent_id)
 
+    # 3) 실행
+    runner = AgentRunner(agent=agent, settings=settings)
     result = await runner.run(message.content, context=context)
 
-    # 3) 결과 렌더링 (텍스트 + 파일 다운로드 element)
-    if isinstance(result, dict) and "text" in result:
-        await render_text(result["text"], elements=result.get("elements"))
-    else:
-        await render_text(str(result))
+    # 4) UI 렌더
+    await render_result(result)

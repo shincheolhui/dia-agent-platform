@@ -19,3 +19,5 @@ workspace/uploads/
 Thumbs.db
 .vscode/
 .idea/
+
+.files

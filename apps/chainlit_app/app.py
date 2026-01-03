@@ -1,6 +1,14 @@
 # apps/chainlit_app/app.py
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+# 프로젝트 루트를 sys.path에 추가 (core, agents import 안정화)
+ROOT_DIR = Path(__file__).resolve().parents[2]  # dia-agent-platform/
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
 from typing import Any, Dict, List
 
 import chainlit as cl

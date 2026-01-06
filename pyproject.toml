@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dia-agent-platform"
+version = "0.1.0"
+description = "DIA (Decision & Insight Automation Agent) platform"
+requires-python = ">=3.10"
+readme = "README.md"
+
+# 주의: 의존성은 지금은 requirements.lock.txt가 기준이므로
+# pyproject에는 강제하지 않습니다. (추후 정리 가능)
+dependencies = []
+
+[tool.setuptools]
+# 현재 레포 구조(core/, agents/, apps/)를 그대로 패키지로 잡습니다.
+# (src/ 구조로 바꾸는 건 나중에 해도 됩니다.)
+package-dir = {"" = "."}
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["core*", "agents*", "apps*"]
+exclude = ["workspace*", "tests*", "docs*"]

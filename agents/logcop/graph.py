@@ -1,3 +1,4 @@
+# agents/logcop/graph.py
 from __future__ import annotations
 
 from pathlib import Path
@@ -39,7 +40,6 @@ def _read_tail(path: str, max_chars: int = 20000) -> str:
 
 
 def _rule_based_log_insights(text: str) -> str:
-    # 아주 단순한 MVP 규칙 기반
     lowered = text.lower()
     hits = []
     for k in ["exception", "error", "stacktrace", "traceback", "caused by", "timeout", "pkix", "ssl", "connection"]:
@@ -75,7 +75,6 @@ async def run_logcop(user_message: str, context: Dict[str, Any], settings: Any) 
     log_text = ""
     source_note = ""
 
-    # 1) 파일 우선
     if uploaded_files:
         f0 = uploaded_files[0]
         path = str(f0.get("path", ""))
@@ -83,15 +82,12 @@ async def run_logcop(user_message: str, context: Dict[str, Any], settings: Any) 
             log_text = _read_tail(path)
             source_note = f"- file: {f0.get('name')}\n- path: {path}\n"
         else:
-            # 텍스트 파일이 아니면 그냥 텍스트 기반 처리로 전환
             source_note = f"- uploaded_file: {f0.get('name')} (non-log)\n- path: {path}\n"
             log_text = user_message
     else:
-        # 2) 파일 없으면 메시지 자체를 로그 텍스트로 취급
         source_note = "- file: (none)\n- source: user_message\n"
         log_text = user_message
 
-    # 3) LLM 시도 (없거나 실패하면 룰 기반)
     llm_client = LLMClient(settings)
     try:
         system_prompt = load_prompt("agents/logcop/prompts/insight.md")
@@ -108,17 +104,26 @@ async def run_logcop(user_message: str, context: Dict[str, Any], settings: Any) 
     )
 
     llm_res = await llm_client.generate(system_prompt=system_prompt, user_prompt=user_prompt)
+
+    llm_hint_line = ""
+    llm_debug_line = ""
+
     if llm_res.ok:
+        events.append(AgentEvent(type="info", name="executor.llm_used", message="[Executor] LLM 인사이트 생성 완료"))
         body = llm_res.content
+        llm_hint_line = "- LLM: 적용됨"
     else:
         events.append(
             AgentEvent(
                 type="warning",
                 name="executor.llm_fallback",
-                message=f"[Executor] LLM 실패 → rule-based fallback 사용 ({llm_res.error})",
+                message=f"[Executor] {llm_res.content} ({llm_res.error})",
             )
         )
         body = _rule_based_log_insights(log_text) + "\n\n" + llm_res.content
+        llm_hint_line = f"- LLM: 미적용 ({llm_res.content})"
+        if llm_res.last_error:
+            llm_debug_line = f"\n\n<details><summary>LLM debug</summary>\n\n- last_error: {llm_res.last_error}\n\n</details>\n"
 
     report = (
         "# LogCop 분석 보고서\n\n"
@@ -126,8 +131,10 @@ async def run_logcop(user_message: str, context: Dict[str, Any], settings: Any) 
         f"{user_message}\n\n"
         "## 입력\n"
         f"{source_note}\n"
+        f"{llm_hint_line}\n"
         "---\n\n"
         f"{body}\n"
+        f"{llm_debug_line}\n"
     )
 
     out_path = _save_text(settings, "logcop_report", report)

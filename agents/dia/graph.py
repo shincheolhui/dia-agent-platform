@@ -151,10 +151,28 @@ async def run_dia(user_message: str, context: Dict[str, Any], settings: Any) -> 
         )
 
         llm_res = await llm_client.generate(system_prompt=system_prompt, user_prompt=user_prompt)
+
+        # UX 힌트(보고서/사용자 문장용)
+        llm_hint_line = ""
+        llm_debug_line = ""
+
         if llm_res.ok:
+            events.append(AgentEvent(type="info", name="executor.llm_used", message="[Executor] LLM 인사이트 생성 완료"))
             llm_section = ensure_sections(llm_res.content)
+            llm_hint_line = "- LLM: 적용됨"
         else:
+            events.append(
+                AgentEvent(
+                    type="warning",
+                    name="executor.llm_fallback",
+                    message=f"[Executor] {llm_res.content} ({llm_res.error})",
+                )
+            )
             llm_section = rule_based_insights(df)
+            llm_hint_line = f"- LLM: 미적용 ({llm_res.content})"
+            # last_error는 UI에 노출하지 않고, 보고서 하단에만 선택적으로 남김
+            if llm_res.last_error:
+                llm_debug_line = f"\n\n<details><summary>LLM debug</summary>\n\n- last_error: {llm_res.last_error}\n\n</details>\n"
 
         report_md = build_markdown_report(
             ReportInputs(
@@ -165,7 +183,7 @@ async def run_dia(user_message: str, context: Dict[str, Any], settings: Any) -> 
                 head_md=head,
                 describe_md=desc,
                 plot_file=(plot_path.name if plot_path else None),
-                llm_insights_md=llm_section,
+                llm_insights_md=(llm_hint_line + "\n\n" + llm_section + llm_debug_line),
             )
         )
 

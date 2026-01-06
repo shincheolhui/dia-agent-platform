@@ -1,3 +1,4 @@
+# core/llm/client.py
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -16,7 +17,8 @@ except Exception:  # pragma: no cover
 class LLMResponse:
     ok: bool
     content: str
-    error: Optional[str] = None
+    error: Optional[str] = None  # missing_api_key | llm_call_failed
+    last_error: Optional[str] = None  # 디버깅용(기본적으로 UI 노출 금지)
 
 
 class LLMClient:
@@ -24,6 +26,7 @@ class LLMClient:
     OpenRouter 기반 LLM 클라이언트.
     - Key가 없으면 실행은 되되, 'LLM 미사용' 메시지를 반환(해커톤 안정성)
     - Key가 있으면 primary -> fallback 순으로 호출
+    - 실패 시 content에는 사용자에게 보여도 안전한 안내만 넣고, last_error로 상세를 보관한다.
     """
 
     def __init__(self, settings: Any):
@@ -56,15 +59,13 @@ class LLMClient:
         )
 
     async def generate(self, system_prompt: str, user_prompt: str) -> LLMResponse:
-        # 1) Key 없으면 즉시 폴백
+        # 1) Key 없으면 즉시 폴백 (UX: 안전한 안내문)
         if not self._has_key():
             return LLMResponse(
                 ok=False,
-                content=(
-                    "LLM API Key가 설정되지 않아 인사이트 생성(LLM 호출)을 건너뜁니다.\n"
-                    "OPENROUTER_API_KEY를 .env에 설정하면 요약/인사이트/액션을 자동 생성합니다."
-                ),
+                content="(LLM 미사용: OPENROUTER_API_KEY 미설정 → rule-based fallback 사용)",
                 error="missing_api_key",
+                last_error=None,
             )
 
         # 2) Key 있으면 Primary → 실패 시 Fallback
@@ -75,7 +76,6 @@ class LLMClient:
         attempts = 0
 
         for model in models_to_try:
-            # 각 모델당 (1 + max_retries) 번 시도
             for _ in range(1 + max_retries):
                 attempts += 1
                 try:
@@ -87,13 +87,17 @@ class LLMClient:
                     resp = await llm.ainvoke(messages)
                     text = getattr(resp, "content", "") or ""
                     if text.strip():
-                        return LLMResponse(ok=True, content=text)
+                        return LLMResponse(ok=True, content=text, error=None, last_error=None)
+
                     last_err = f"empty_response(model={model})"
-                except Exception as e:  # 네트워크/429/모델 오류 등
+                except Exception as e:
+                    # 디버깅용은 last_error로만 보관(기본적으로 UI 노출 금지)
                     last_err = f"{type(e).__name__}: {e}"
 
+        # UX: 사용자에게는 'LLM 실패 → fallback'만 알리고, 상세는 last_error로 남긴다.
         return LLMResponse(
             ok=False,
-            content=f"LLM 호출에 실패했습니다. (primary/fallback 모두 실패)\n- last_error: {last_err}",
+            content="(LLM 호출 실패 → rule-based fallback 사용)",
             error="llm_call_failed",
+            last_error=last_err,
         )

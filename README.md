@@ -285,3 +285,15 @@ pip check
 > 본 프로젝트는 환경 문제로 인한 실행 실패 가능성을 최소화하도록 설계되었습니다.
 
 ---
+
+## Smoke Tests (권장 실행 방식)
+
+Windows/IDE 환경 차이로 인한 import 문제를 피하기 위해,
+smoke 스크립트는 **항상 모듈 실행(-m)** 으로 실행합니다.
+
+```powershell
+python -m scripts.smoke_context
+python -m scripts.smoke_file_loader
+python -m scripts.smoke_route
+python -m scripts.smoke_llm
+```

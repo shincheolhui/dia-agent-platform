@@ -1,8 +1,10 @@
+# core/agent/runner.py
 from typing import Any, Dict, Optional
 
 from core.agent.registry import AgentRegistry
 from core.agent.router import decide_agent_id
 from core.artifacts.types import AgentEvent, AgentResult
+from core.context import normalize_context
 
 
 class AgentRunner:
@@ -15,7 +17,8 @@ class AgentRunner:
         user_message: str,
         context: Optional[Dict[str, Any]] = None,
     ) -> AgentResult:
-        context = context or {}
+        # 0) context 표준화 (Phase2-1 핵심)
+        ctx = normalize_context(context).to_dict()
 
         active = getattr(self.settings, "ACTIVE_AGENT", "dia")
         available = self.registry.list_ids()
@@ -24,7 +27,7 @@ class AgentRunner:
         if active == "auto":
             decision = decide_agent_id(
                 user_message=user_message,
-                context=context,
+                context=ctx,
                 available_agent_ids=available,
                 default_agent_id="dia",
             )
@@ -32,7 +35,7 @@ class AgentRunner:
             route_event = AgentEvent(
                 type="info",
                 name="router",
-                message=f"[Agent Routing Decision] agent='{agent_id}' (confidence={decision.confidence}) reason={decision.reason}",
+                message=f"[router] agent={agent_id} (confidence={decision.confidence}) reason={decision.reason}",
             )
         else:
             agent_id = active
@@ -54,10 +57,8 @@ class AgentRunner:
                         AgentEvent(type="error", name="router", message="no agents registered"),
                     ],
                     artifacts=[],
-                    ok=False,
-                    error="no_agents",
+                    meta={"ok": False, "error": "no_agents"},
                 )
-
             agent = self.registry.get(fallback_id)
             agent_id = fallback_id
             route_event = AgentEvent(
@@ -67,7 +68,7 @@ class AgentRunner:
             )
 
         # 2) agent 실행
-        result = await agent.run(user_message=user_message, context=context, settings=self.settings)
+        result = await agent.run(user_message=user_message, context=ctx, settings=self.settings)
 
         # 3) 라우팅 이벤트를 항상 맨 앞에 prepend
         result.events = [route_event] + (result.events or [])

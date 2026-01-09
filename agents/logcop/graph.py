@@ -10,6 +10,7 @@ from core.utils.time import ts
 
 from core.llm.client import LLMClient
 from core.llm.prompts import load_prompt
+from core.tools.file_loader import load_file  # ✅ 단일 진입점
 
 
 def _artifact_dir(settings: Any) -> Path:
@@ -24,23 +25,16 @@ def _save_text(settings: Any, title: str, body: str) -> Path:
     return out_path
 
 
-def _detect_text_file(path: str) -> bool:
-    ext = Path(path).suffix.lower()
-    return ext in [".log", ".txt", ".out"]
-
-
-def _read_tail(path: str, max_chars: int = 20000) -> str:
-    p = Path(path)
-    if not p.exists():
-        return f"(file not found: {path})"
-    data = p.read_text(encoding="utf-8", errors="replace")
-    if len(data) <= max_chars:
-        return data
-    return data[-max_chars:]
+def _get_data(load_res: Any) -> dict:
+    """
+    ToolResult.data를 dict로 안전하게 반환
+    """
+    data = getattr(load_res, "data", None)
+    return data if isinstance(data, dict) else {}
 
 
 def _rule_based_log_insights(text: str) -> str:
-    lowered = text.lower()
+    lowered = (text or "").lower()
     hits = []
     for k in ["exception", "error", "stacktrace", "traceback", "caused by", "timeout", "pkix", "ssl", "connection"]:
         if k in lowered:
@@ -75,19 +69,63 @@ async def run_logcop(user_message: str, context: Dict[str, Any], settings: Any) 
     log_text = ""
     source_note = ""
 
+    # 1) 파일 우선 (✅ load_file만 사용)
     if uploaded_files:
         f0 = uploaded_files[0]
         path = str(f0.get("path", ""))
-        if _detect_text_file(path):
-            log_text = _read_tail(path)
-            source_note = f"- file: {f0.get('name')}\n- path: {path}\n"
-        else:
-            source_note = f"- uploaded_file: {f0.get('name')} (non-log)\n- path: {path}\n"
+        name = str(f0.get("name", Path(path).name))
+
+        load_res = load_file(path)
+        ok = bool(getattr(load_res, "ok", False))
+        summary = getattr(load_res, "summary", None)
+        error = getattr(load_res, "error", None)
+
+        data = _get_data(load_res)
+        kind = str(data.get("kind", "unknown"))
+
+        source_note = (
+            f"- file: {name}\n"
+            f"- path: {path}\n"
+            f"- loader_kind: {kind}\n"
+            f"- loader_summary: {summary}\n"
+        )
+
+        if not ok:
+            # ✅ P2-1-A 규칙: Agent에서 tail 등 파일 직접 처리는 하지 않는다.
+            events.append(
+                AgentEvent(
+                    type="warning",
+                    name="executor.file_loader_failed",
+                    message=f"[Executor] 파일 로드 실패 → user_message 기반으로 진행 ({error})",
+                )
+            )
             log_text = user_message
+        else:
+            # ✅ TEXT면 text 우선, 그 외엔 text/preview_csv 등을 힌트로라도 사용
+            text = data.get("text") or data.get("content") or ""
+            if not str(text).strip():
+                preview_csv = data.get("preview_csv", "")
+                if preview_csv:
+                    text = preview_csv
+
+            log_text = str(text).strip()
+
+            if not log_text:
+                events.append(
+                    AgentEvent(
+                        type="warning",
+                        name="executor.no_text_from_loader",
+                        message="[Executor] 로더 결과에 사용 가능한 텍스트가 없어 user_message로 대체합니다.",
+                    )
+                )
+                log_text = user_message
+
     else:
+        # 2) 파일 없으면 메시지 자체를 로그 텍스트로 취급
         source_note = "- file: (none)\n- source: user_message\n"
         log_text = user_message
 
+    # 3) LLM 시도 (없거나 실패하면 룰 기반)
     llm_client = LLMClient(settings)
     try:
         system_prompt = load_prompt("agents/logcop/prompts/insight.md")
@@ -120,10 +158,23 @@ async def run_logcop(user_message: str, context: Dict[str, Any], settings: Any) 
                 message=f"[Executor] {llm_res.content} ({llm_res.error})",
             )
         )
+
         body = _rule_based_log_insights(log_text) + "\n\n" + llm_res.content
-        llm_hint_line = f"- LLM: 미적용 ({llm_res.content})"
+
+        if llm_res.error == "network_unreachable":
+            llm_hint_line = "- LLM: 미적용 (폐쇄망/네트워크 제한)"
+        elif llm_res.error == "llm_disabled":
+            llm_hint_line = "- LLM: 미적용 (LLM_ENABLED=false)"
+        elif llm_res.error == "missing_api_key":
+            llm_hint_line = "- LLM: 미적용 (API Key 미설정)"
+        else:
+            llm_hint_line = "- LLM: 미적용 (호출 실패)"
+
         if llm_res.last_error:
-            llm_debug_line = f"\n\n<details><summary>LLM debug</summary>\n\n- last_error: {llm_res.last_error}\n\n</details>\n"
+            llm_debug_line = (
+                f"\n\n<details><summary>LLM debug</summary>\n\n"
+                f"- last_error: {llm_res.last_error}\n\n</details>\n"
+            )
 
     report = (
         "# LogCop 분석 보고서\n\n"

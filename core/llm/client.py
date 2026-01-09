@@ -7,7 +7,6 @@ from typing import Any, Dict, Optional
 from core.llm.models import get_model_policy
 
 try:
-    # langchain-openai
     from langchain_openai import ChatOpenAI
 except Exception:  # pragma: no cover
     ChatOpenAI = None
@@ -17,32 +16,69 @@ except Exception:  # pragma: no cover
 class LLMResponse:
     ok: bool
     content: str
-    error: Optional[str] = None  # missing_api_key | llm_call_failed
-    last_error: Optional[str] = None  # 디버깅용(기본적으로 UI 노출 금지)
+    # error: missing_api_key | llm_call_failed | llm_disabled | network_unreachable
+    error: Optional[str] = None
+    last_error: Optional[str] = None
 
 
 class LLMClient:
     """
     OpenRouter 기반 LLM 클라이언트.
-    - Key가 없으면 실행은 되되, 'LLM 미사용' 메시지를 반환(해커톤 안정성)
+    - LLM_ENABLED=false면 아예 호출하지 않음(폐쇄망/데모 안정성)
+    - Key가 없으면 실행은 되되, 'LLM 미사용' 메시지 반환
     - Key가 있으면 primary -> fallback 순으로 호출
-    - 실패 시 content에는 사용자에게 보여도 안전한 안내만 넣고, last_error로 상세를 보관한다.
+    - 네트워크 불가(APIConnectionError 등)는 UX에서 "환경 제약"으로 분류
     """
 
     def __init__(self, settings: Any):
         self.settings = settings
         self.policy = get_model_policy(settings)
 
+    def _enabled(self) -> bool:
+        return bool(getattr(self.settings, "LLM_ENABLED", True))
+
     def _has_key(self) -> bool:
         key = getattr(self.settings, "OPENROUTER_API_KEY", None)
         return bool(key and str(key).strip())
 
     def _headers(self) -> Dict[str, str]:
-        # OpenRouter 권장 헤더(옵션)
         return {
             "HTTP-Referer": getattr(self.settings, "OPENROUTER_HTTP_REFERER", "http://localhost"),
             "X-Title": getattr(self.settings, "OPENROUTER_APP_TITLE", "dia-agent-platform"),
         }
+
+    def _is_network_error(self, e: Exception) -> bool:
+        # langchain-openai/openai/httpx 계층에서 흔한 네트워크 단절/차단 시그널들을 포괄적으로 감지
+        name = type(e).__name__
+        msg = str(e).lower()
+
+        network_names = {
+            "APIConnectionError",
+            "ConnectError",
+            "ConnectionError",
+            "ConnectTimeout",
+            "ReadTimeout",
+            "TimeoutException",
+            "NewConnectionError",
+            "NameResolutionError",
+        }
+        if name in network_names:
+            return True
+
+        network_markers = [
+            "connection error",
+            "failed to establish a new connection",
+            "name or service not known",
+            "nodename nor servname provided",
+            "temporary failure in name resolution",
+            "dns",
+            "connect timeout",
+            "read timeout",
+            "timed out",
+            "proxy error",
+            "tunnel connection failed",
+        ]
+        return any(m in msg for m in network_markers)
 
     def _build_llm(self, model: str):
         if ChatOpenAI is None:
@@ -56,16 +92,29 @@ class LLMClient:
             temperature=float(getattr(self.settings, "LLM_TEMPERATURE", 0.2)),
             max_tokens=int(getattr(self.settings, "LLM_MAX_TOKENS", 900)),
             timeout=int(getattr(self.settings, "LLM_TIMEOUT_SEC", 45)),
+            # 중요: openai SDK가 내부에서 과도하게 retry 로그를 남기는 경우가 있어 0으로 고정
+            # (우리의 primary/fallback 및 외부 재시도 정책으로 충분)
+            max_retries=0,
         )
 
     async def generate(self, system_prompt: str, user_prompt: str) -> LLMResponse:
-        # 1) Key 없으면 즉시 폴백 (UX: 안전한 안내문)
+        # 0) 사용자가/환경이 LLM 비활성화
+        if not self._enabled():
+            return LLMResponse(
+                ok=False,
+                content="현재 환경 설정(LLM_ENABLED=false)으로 LLM 인사이트 생성을 건너뜁니다.",
+                error="llm_disabled",
+            )
+
+        # 1) Key 없으면 즉시 폴백
         if not self._has_key():
             return LLMResponse(
                 ok=False,
-                content="(LLM 미사용: OPENROUTER_API_KEY 미설정 → rule-based fallback 사용)",
+                content=(
+                    "LLM API Key가 설정되지 않아 인사이트 생성(LLM 호출)을 건너뜁니다.\n"
+                    "OPENROUTER_API_KEY를 .env에 설정하면 요약/인사이트/액션을 자동 생성합니다."
+                ),
                 error="missing_api_key",
-                last_error=None,
             )
 
         # 2) Key 있으면 Primary → 실패 시 Fallback
@@ -73,11 +122,8 @@ class LLMClient:
         models_to_try = [self.policy.primary, self.policy.fallback]
 
         max_retries = int(getattr(self.settings, "LLM_MAX_RETRIES", 1))
-        attempts = 0
-
         for model in models_to_try:
             for _ in range(1 + max_retries):
-                attempts += 1
                 try:
                     llm = self._build_llm(model)
                     messages = [
@@ -87,17 +133,23 @@ class LLMClient:
                     resp = await llm.ainvoke(messages)
                     text = getattr(resp, "content", "") or ""
                     if text.strip():
-                        return LLMResponse(ok=True, content=text, error=None, last_error=None)
-
+                        return LLMResponse(ok=True, content=text)
                     last_err = f"empty_response(model={model})"
                 except Exception as e:
-                    # 디버깅용은 last_error로만 보관(기본적으로 UI 노출 금지)
+                    # 네트워크 차단/폐쇄망이면 더 시도해도 의미 없으니 즉시 종료(UX는 '환경 제약'으로)
+                    if self._is_network_error(e):
+                        return LLMResponse(
+                            ok=False,
+                            content="외부 네트워크 연결이 불가하여(폐쇄망/차단/프록시 미설정) LLM 인사이트 생성을 건너뜁니다.",
+                            error="network_unreachable",
+                            last_error=f"{type(e).__name__}: {e}",
+                        )
+
                     last_err = f"{type(e).__name__}: {e}"
 
-        # UX: 사용자에게는 'LLM 실패 → fallback'만 알리고, 상세는 last_error로 남긴다.
         return LLMResponse(
             ok=False,
-            content="(LLM 호출 실패 → rule-based fallback 사용)",
+            content="LLM 호출에 실패했습니다. (primary/fallback 모두 실패)",
             error="llm_call_failed",
             last_error=last_err,
         )

@@ -5,7 +5,6 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 import pandas as pd
-import pdfplumber
 import matplotlib.pyplot as plt
 
 from core.artifacts.types import AgentEvent, AgentResult, ArtifactRef
@@ -15,6 +14,8 @@ from core.utils.time import ts
 from core.llm.client import LLMClient
 from core.llm.prompts import load_prompt, default_insight_prompt
 from core.llm.validators import ensure_sections
+from core.tools.file_loader import load_file  # ✅ 단일 진입점
+
 from agents.dia.report import ReportInputs, build_markdown_report
 from agents.dia.insights import rule_based_insights
 
@@ -52,15 +53,6 @@ def _save_line_plot(settings: Any, df: pd.DataFrame, title: str) -> Path | None:
     return out_path
 
 
-def _detect_kind(file_path: str) -> str:
-    ext = Path(file_path).suffix.lower()
-    if ext == ".csv":
-        return "csv"
-    if ext == ".pdf":
-        return "pdf"
-    return "unknown"
-
-
 def _summarize_numeric(df: pd.DataFrame) -> str:
     num = df.select_dtypes(include="number")
     if num.empty:
@@ -73,6 +65,34 @@ def _summarize_numeric(df: pd.DataFrame) -> str:
             f"- {col}: mean={row['mean']}, std={row['std']}, min={row['min']}, p50={row['50%']}, max={row['max']}"
         )
     return "\n".join(lines)
+
+
+def _coerce_kind(load_res: Any, fallback_path: str) -> str:
+    """
+    load_file 결과 객체/딕셔너리 모두 지원.
+    kind가 없으면 확장자로 추정(최후 fallback).
+    """
+    kind = None
+    if isinstance(load_res, dict):
+        kind = load_res.get("kind")
+    else:
+        kind = getattr(load_res, "kind", None)
+
+    if kind:
+        return str(kind).lower()
+
+    ext = Path(fallback_path).suffix.lower()
+    if ext == ".csv":
+        return "csv"
+    if ext == ".pdf":
+        return "pdf"
+    return "unknown"
+
+
+def _get_attr(load_res: Any, key: str, default=None):
+    if isinstance(load_res, dict):
+        return load_res.get(key, default)
+    return getattr(load_res, key, default)
 
 
 async def run_dia(user_message: str, context: Dict[str, Any], settings: Any) -> AgentResult:
@@ -121,92 +141,185 @@ async def run_dia(user_message: str, context: Dict[str, Any], settings: Any) -> 
 
     # 파일 1개 MVP 처리
     f0 = uploaded_files[0]
-    file_path = f0["path"]
-    kind = _detect_kind(file_path)
+    file_path = str(f0.get("path", ""))
+    file_name = str(f0.get("name", Path(file_path).name))
 
-    if kind == "csv":
-        df = pd.read_csv(file_path)
-        head = df.head(10).to_markdown(index=False)
-        desc = df.describe(include="all").to_markdown()
-        plot_path = _save_line_plot(settings, df, title=f"dia_csv_plot_{Path(file_path).stem}")
+    # ✅ 파일 로딩은 반드시 Tool로
+    load_res = load_file(file_path)
+    ok = bool(_get_attr(load_res, "ok", False))
+    kind = _coerce_kind(load_res, file_path)
+    summary = _get_attr(load_res, "summary", None)
+    error = _get_attr(load_res, "error", None)
 
-        # LLM 인사이트 (없으면 rule-based)
-        llm_client = LLMClient(settings)
-        prompt_path = "agents/dia/prompts/insight.md"
-        try:
-            system_prompt = load_prompt(prompt_path)
-        except Exception:
-            system_prompt = default_insight_prompt()
+    if not ok:
+        # 로더 실패 UX
+        events.append(
+            AgentEvent(
+                type="error",
+                name="Executor.file_loader_failed",
+                message=f"파일 로드 실패: {error or 'unknown_error'}",
+            )
+        )
+        body = (
+            f"# DIA 결과\n\n"
+            f"## 요청\n{user_message}\n\n"
+            f"## 파일\n- name: {file_name}\n- path: {file_path}\n\n"
+            f"## 처리\n"
+            f"- 파일 로드에 실패했습니다.\n"
+            f"- error: {error}\n"
+            f"- summary: {summary}\n\n"
+            f"### 권장 액션\n"
+            f"- 파일이 열려있다면 닫고 다시 업로드\n"
+            f"- CSV 인코딩(UTF-8/CP949) 확인\n"
+            f"- 파일 크기가 매우 크면 일부만 샘플로 줄여 업로드\n"
+        )
+        md_path = _save_artifact_markdown(settings, title="dia_file_load_failed", body=body)
+        artifacts.append(ArtifactRef(kind="markdown", name=md_path.name, path=str(md_path), mime_type="text/markdown"))
 
-        numeric_summary = _summarize_numeric(df)
-        user_prompt = (
-            f"[사용자 요청]\n{user_message}\n\n"
-            f"[데이터 개요]\n"
-            f"- file: {f0['name']}\n"
-            f"- shape: {df.shape[0]} x {df.shape[1]}\n"
-            f"- columns: {', '.join(map(str, df.columns.tolist()))}\n\n"
-            f"[숫자 컬럼 요약]\n{numeric_summary}\n\n"
-            f"[상위 10행]\n{df.head(10).to_csv(index=False)}\n\n"
-            f"[그래프]\n- plot_file: {plot_path.name if plot_path else '(none)'}\n"
+        events.append(AgentEvent(type="step_end", name="Executor", message="파일 로드 실패 처리 완료"))
+        events.append(AgentEvent(type="step_start", name="Reviewer", message="검증 시작"))
+        events.append(AgentEvent(type="log", name="Reviewer", message="로더 실패 케이스: 안내/조치 가이드 제공으로 승인"))
+        events.append(AgentEvent(type="step_end", name="Reviewer", message="승인"))
+
+        return AgentResult(
+            text="DIA Agent 실행 완료입니다. (파일 로드 실패 안내)",
+            artifacts=artifacts,
+            events=events,
+            meta={"agent_id": "dia", "mode": "load_failed", "kind": kind},
         )
 
-        llm_res = await llm_client.generate(system_prompt=system_prompt, user_prompt=user_prompt)
+    events.append(
+        AgentEvent(
+            type="info",
+            name="Executor.file_loaded",
+            message=f"파일 로드 성공: kind={kind} / {summary or ''}".strip(),
+        )
+    )
 
-        # UX 힌트(보고서/사용자 문장용)
-        llm_hint_line = ""
-        llm_debug_line = ""
+    if kind == "csv":
+        # load_file 결과에서 DF 추출 (구현체 차이를 흡수)
+        df = _get_attr(load_res, "df", None)
+        if df is None:
+            df = _get_attr(load_res, "dataframe", None)
 
-        if llm_res.ok:
-            events.append(AgentEvent(type="info", name="executor.llm_used", message="[Executor] LLM 인사이트 생성 완료"))
-            llm_section = ensure_sections(llm_res.content)
-            llm_hint_line = "- LLM: 적용됨"
-        else:
+        if df is None or not isinstance(df, pd.DataFrame):
+            # CSV인데 DF가 없다면: preview_csv라도 있으면 안내로 대체
+            preview_csv = _get_attr(load_res, "preview_csv", "")
             events.append(
                 AgentEvent(
                     type="warning",
-                    name="executor.llm_fallback",
-                    message=f"[Executor] {llm_res.content} ({llm_res.error})",
+                    name="Executor.csv_no_dataframe",
+                    message="CSV로 인식되었으나 DataFrame이 없어 preview 기반으로 처리합니다.",
                 )
             )
-            llm_section = rule_based_insights(df)
-            llm_hint_line = f"- LLM: 미적용 ({llm_res.content})"
-            # last_error는 UI에 노출하지 않고, 보고서 하단에만 선택적으로 남김
-            if llm_res.last_error:
-                llm_debug_line = f"\n\n<details><summary>LLM debug</summary>\n\n- last_error: {llm_res.last_error}\n\n</details>\n"
-
-        report_md = build_markdown_report(
-            ReportInputs(
-                user_request=user_message,
-                file_name=f0["name"],
-                file_path=file_path,
-                shape=f"{df.shape[0]} x {df.shape[1]}",
-                head_md=head,
-                describe_md=desc,
-                plot_file=(plot_path.name if plot_path else None),
-                llm_insights_md=(llm_hint_line + "\n\n" + llm_section + llm_debug_line),
+            md_path = _save_artifact_markdown(
+                settings,
+                title="dia_csv_preview_only",
+                body=(
+                    f"# DIA 결과 (CSV Preview)\n\n"
+                    f"## 요청\n{user_message}\n\n"
+                    f"## 파일\n- name: {file_name}\n- path: {file_path}\n\n"
+                    f"## Preview\n\n```csv\n{preview_csv}\n```\n"
+                ),
             )
-        )
+            artifacts.append(ArtifactRef(kind="markdown", name=md_path.name, path=str(md_path), mime_type="text/markdown"))
+            events.append(AgentEvent(type="step_end", name="Executor", message="CSV preview 처리 완료"))
 
-        md_path = _save_artifact_markdown(
-            settings,
-            title=f"dia_csv_report_{Path(file_path).stem}",
-            body=report_md,
-        )
-        artifacts.append(ArtifactRef(kind="markdown", name=md_path.name, path=str(md_path), mime_type="text/markdown"))
+        else:
+            head = df.head(10).to_markdown(index=False)
+            desc_md = df.describe(include="all").to_markdown()
+            plot_path = _save_line_plot(settings, df, title=f"dia_csv_plot_{Path(file_path).stem}")
 
-        if plot_path is not None:
-            artifacts.append(ArtifactRef(kind="image", name=plot_path.name, path=str(plot_path), mime_type="image/png"))
+            # LLM 인사이트 (없으면 rule-based)
+            llm_client = LLMClient(settings)
+            prompt_path = "agents/dia/prompts/insight.md"
+            try:
+                system_prompt = load_prompt(prompt_path)
+            except Exception:
+                system_prompt = default_insight_prompt()
 
-        events.append(AgentEvent(type="log", name="Executor", message="CSV 처리 완료: 보고서/그래프 생성"))
-        events.append(AgentEvent(type="step_end", name="Executor", message="실행 완료"))
+            numeric_summary = _summarize_numeric(df)
+            user_prompt = (
+                f"[사용자 요청]\n{user_message}\n\n"
+                f"[데이터 개요]\n"
+                f"- file: {file_name}\n"
+                f"- shape: {df.shape[0]} x {df.shape[1]}\n"
+                f"- columns: {', '.join(map(str, df.columns.tolist()))}\n\n"
+                f"[숫자 컬럼 요약]\n{numeric_summary}\n\n"
+                f"[상위 10행]\n{df.head(10).to_csv(index=False)}\n\n"
+                f"[그래프]\n- plot_file: {plot_path.name if plot_path else '(none)'}\n"
+            )
+
+            llm_res = await llm_client.generate(system_prompt=system_prompt, user_prompt=user_prompt)
+
+            llm_hint_line = ""
+            llm_debug_line = ""
+
+            if llm_res.ok:
+                events.append(AgentEvent(type="info", name="executor.llm_used", message="[Executor] LLM 인사이트 생성 완료"))
+                llm_section = ensure_sections(llm_res.content)
+                llm_hint_line = "- LLM: 적용됨"
+            else:
+                events.append(
+                    AgentEvent(
+                        type="warning",
+                        name="executor.llm_fallback",
+                        message=f"[Executor] {llm_res.content} ({llm_res.error})",
+                    )
+                )
+
+                llm_section = rule_based_insights(df)
+
+                if llm_res.error == "network_unreachable":
+                    llm_hint_line = "- LLM: 미적용 (폐쇄망/네트워크 제한)"
+                elif llm_res.error == "llm_disabled":
+                    llm_hint_line = "- LLM: 미적용 (LLM_ENABLED=false)"
+                elif llm_res.error == "missing_api_key":
+                    llm_hint_line = "- LLM: 미적용 (API Key 미설정)"
+                else:
+                    llm_hint_line = "- LLM: 미적용 (호출 실패)"
+
+                # last_error는 UI에 노출하지 않고 보고서 하단에만 선택적으로 남김
+                llm_debug_line = ""
+                if llm_res.last_error:
+                    llm_debug_line = (
+                        f"\n\n<details><summary>LLM debug</summary>\n\n"
+                        f"- last_error: {llm_res.last_error}\n\n</details>\n"
+                    )
+
+            report_md = build_markdown_report(
+                ReportInputs(
+                    user_request=user_message,
+                    file_name=file_name,
+                    file_path=file_path,
+                    shape=f"{df.shape[0]} x {df.shape[1]}",
+                    head_md=head,
+                    describe_md=desc_md,
+                    plot_file=(plot_path.name if plot_path else None),
+                    llm_insights_md=(llm_hint_line + "\n\n" + llm_section + llm_debug_line),
+                )
+            )
+
+            md_path = _save_artifact_markdown(
+                settings,
+                title=f"dia_csv_report_{Path(file_path).stem}",
+                body=report_md,
+            )
+            artifacts.append(ArtifactRef(kind="markdown", name=md_path.name, path=str(md_path), mime_type="text/markdown"))
+
+            if plot_path is not None:
+                artifacts.append(ArtifactRef(kind="image", name=plot_path.name, path=str(plot_path), mime_type="image/png"))
+
+            events.append(AgentEvent(type="log", name="Executor", message="CSV 처리 완료: 보고서/그래프 생성"))
+            events.append(AgentEvent(type="step_end", name="Executor", message="실행 완료"))
 
     elif kind == "pdf":
-        text = ""
-        with pdfplumber.open(file_path) as pdf:
-            if len(pdf.pages) > 0:
-                text = (pdf.pages[0].extract_text() or "").strip()
+        # load_file 결과에서 text 추출
+        text = _get_attr(load_res, "text", "") or _get_attr(load_res, "content", "") or ""
+        text = str(text).strip() if text else ""
+
         if not text:
-            text = "(첫 페이지 텍스트 추출 실패: 스캔 PDF 가능)"
+            text = "(텍스트 추출 실패: 스캔 PDF 가능)"
 
         md_path = _save_artifact_markdown(
             settings,
@@ -214,8 +327,8 @@ async def run_dia(user_message: str, context: Dict[str, Any], settings: Any) -> 
             body=(
                 f"# DIA 분석 결과 (PDF)\n\n"
                 f"## 요청\n{user_message}\n\n"
-                f"## 파일\n- name: {f0['name']}\n- path: {file_path}\n\n"
-                f"## 첫 페이지 텍스트\n\n{text}\n"
+                f"## 파일\n- name: {file_name}\n- path: {file_path}\n\n"
+                f"## 텍스트(발췌)\n\n{text}\n"
             ),
         )
         artifacts.append(ArtifactRef(kind="markdown", name=md_path.name, path=str(md_path), mime_type="text/markdown"))
@@ -227,8 +340,10 @@ async def run_dia(user_message: str, context: Dict[str, Any], settings: Any) -> 
             title="dia_unsupported_file",
             body=(
                 f"# DIA 결과\n\n## 요청\n{user_message}\n\n"
-                f"## 파일\n- name: {f0['name']}\n- path: {file_path}\n\n"
-                "## 처리\n지원하지 않는 파일 형식입니다. (CSV/PDF만 지원)\n"
+                f"## 파일\n- name: {file_name}\n- path: {file_path}\n\n"
+                f"## 처리\n지원하지 않는 파일 형식입니다. (CSV/PDF만 지원)\n"
+                f"- detected_kind: {kind}\n"
+                f"- loader_summary: {summary}\n"
             ),
         )
         artifacts.append(ArtifactRef(kind="markdown", name=md_path.name, path=str(md_path), mime_type="text/markdown"))

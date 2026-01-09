@@ -24,6 +24,8 @@ class Settings(BaseSettings):
     LLM_MAX_RETRIES: int = 1
     LLM_MAX_TOKENS: int = 900
     LLM_TEMPERATURE: float = 0.2
+    LLM_ENABLED: bool = False  # 폐쇄망/데모 안정성: 기본 OFF 권장
+
 
     # OpenRouter Optional headers
     OPENROUTER_APP_TITLE: str = "dia-agent-platform"

@@ -11,6 +11,8 @@ except Exception:  # pragma: no cover
     pdfplumber = None
 
 from core.tools.base import ToolResult
+from core.logging.logger import get_logger
+log = get_logger(__name__)
 
 
 def _read_tail_text(p: Path, *, max_chars: int = 20000) -> tuple[str, bool]:
@@ -38,6 +40,7 @@ def load_file(
     """
     p = Path(path)
     if not p.exists():
+        log.warning("load_file.not_found path=%s", str(p), extra={"trace_id": "-"})
         return ToolResult(ok=False, summary="file not found", error="file_not_found", last_error=str(p))
 
     ext = p.suffix.lower()
@@ -46,6 +49,16 @@ def load_file(
         # 0) TEXT (log/txt/out)
         if ext in {".log", ".txt", ".out"}:
             text, truncated = _read_tail_text(p, max_chars=text_max_chars)
+            log.info(
+                "load_file.text ok path=%s chars=%s truncated=%s",
+                str(p), len(text), truncated,
+                extra={"trace_id": "-"},
+            )
+            log.info(
+                "load_file.text ok path=%s chars=%s truncated=%s",
+                str(p), len(text), truncated,
+                extra={"trace_id": "-"},
+            )
             return ToolResult(
                 ok=True,
                 summary=f"loaded text: chars={len(text)} truncated={truncated}",
@@ -64,6 +77,11 @@ def load_file(
             df = pd.read_csv(p)
             if len(df) > max_rows:
                 df = df.head(max_rows)
+            log.info(
+                "load_file.csv ok path=%s shape=%sx%s",
+                str(p), df.shape[0], df.shape[1],
+                extra={"trace_id": "-"},
+            )
             return ToolResult(
                 ok=True,
                 summary=f"loaded csv: shape={df.shape[0]}x{df.shape[1]}",
@@ -82,6 +100,11 @@ def load_file(
             df = pd.read_excel(p)
             if len(df) > max_rows:
                 df = df.head(max_rows)
+            log.info(
+                "load_file.excel ok path=%s shape=%sx%s",
+                str(p), df.shape[0], df.shape[1],
+                extra={"trace_id": "-"},
+            )
             return ToolResult(
                 ok=True,
                 summary=f"loaded excel: shape={df.shape[0]}x{df.shape[1]}",
@@ -115,6 +138,11 @@ def load_file(
             if not joined:
                 joined = "(텍스트 추출 실패: 스캔 PDF 가능)"
 
+            log.info(
+                "load_file.pdf ok path=%s pages_read=%s text_len=%s",
+                str(p), min(pdf_max_pages, len(texts)), len(joined),
+                extra={"trace_id": "-"},
+            )
             return ToolResult(
                 ok=True,
                 summary=f"loaded pdf: pages={min(pdf_max_pages, len(texts))}",
@@ -127,9 +155,19 @@ def load_file(
                 },
             )
 
+        log.warning(
+            "load_file.unsupported path=%s ext=%s",
+            str(p), ext,
+            extra={"trace_id": "-"},
+        )
         return ToolResult(ok=False, summary="unsupported file type", error="unsupported_type", last_error=ext)
 
     except Exception as e:
+        log.exception(
+            "load_file.failed path=%s ext=%s err=%s",
+            str(p), ext, f"{type(e).__name__}: {e}",
+            extra={"trace_id": "-"},
+        )
         return ToolResult(
             ok=False,
             summary="file load failed",

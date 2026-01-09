@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 from core.llm.models import get_model_policy
+from core.logging.logger import get_logger
+log = get_logger(__name__)
 
 try:
     from langchain_openai import ChatOpenAI
@@ -100,6 +102,7 @@ class LLMClient:
     async def generate(self, system_prompt: str, user_prompt: str) -> LLMResponse:
         # 0) 사용자가/환경이 LLM 비활성화
         if not self._enabled():
+            log.info("llm.skip reason=llm_disabled", extra={"trace_id": "-"})
             return LLMResponse(
                 ok=False,
                 content="현재 환경 설정(LLM_ENABLED=false)으로 LLM 인사이트 생성을 건너뜁니다.",
@@ -108,6 +111,7 @@ class LLMClient:
 
         # 1) Key 없으면 즉시 폴백
         if not self._has_key():
+            log.info("llm.skip reason=missing_api_key", extra={"trace_id": "-"})
             return LLMResponse(
                 ok=False,
                 content=(
@@ -120,10 +124,10 @@ class LLMClient:
         # 2) Key 있으면 Primary → 실패 시 Fallback
         last_err: str | None = None
         models_to_try = [self.policy.primary, self.policy.fallback]
-
         max_retries = int(getattr(self.settings, "LLM_MAX_RETRIES", 1))
+
         for model in models_to_try:
-            for _ in range(1 + max_retries):
+            for attempt in range(1, 2 + max_retries):
                 try:
                     llm = self._build_llm(model)
                     messages = [
@@ -133,11 +137,26 @@ class LLMClient:
                     resp = await llm.ainvoke(messages)
                     text = getattr(resp, "content", "") or ""
                     if text.strip():
+                        log.info(
+                            "llm.ok model=%s attempt=%s chars=%s",
+                            model, attempt, len(text),
+                            extra={"trace_id": "-"},
+                        )
                         return LLMResponse(ok=True, content=text)
                     last_err = f"empty_response(model={model})"
+                    log.warning(
+                        "llm.empty model=%s attempt=%s",
+                        model, attempt,
+                        extra={"trace_id": "-"},
+                    )
                 except Exception as e:
                     # 네트워크 차단/폐쇄망이면 더 시도해도 의미 없으니 즉시 종료(UX는 '환경 제약'으로)
                     if self._is_network_error(e):
+                        log.warning(
+                            "llm.skip reason=network_unreachable model=%s err=%s",
+                            model, f"{type(e).__name__}: {e}",
+                            extra={"trace_id": "-"},
+                        )
                         return LLMResponse(
                             ok=False,
                             content="외부 네트워크 연결이 불가하여(폐쇄망/차단/프록시 미설정) LLM 인사이트 생성을 건너뜁니다.",
@@ -146,7 +165,17 @@ class LLMClient:
                         )
 
                     last_err = f"{type(e).__name__}: {e}"
+                    log.warning(
+                        "llm.fail model=%s attempt=%s err=%s",
+                        model, attempt, last_err,
+                        extra={"trace_id": "-"},
+                    )
 
+        log.error(
+            "llm.giveup err=%s",
+            last_err,
+            extra={"trace_id": "-"},
+        )
         return LLMResponse(
             ok=False,
             content="LLM 호출에 실패했습니다. (primary/fallback 모두 실패)",

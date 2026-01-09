@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import sys
+import logging
+import chainlit as cl
+
 from pathlib import Path
 
 # 프로젝트 루트를 sys.path에 추가 (core, agents import 안정화)
@@ -11,12 +14,10 @@ if str(ROOT_DIR) not in sys.path:
 
 from typing import Any, Dict, List
 
-import chainlit as cl
-
 from core.config.settings import get_settings
 from core.agent.registry import AgentRegistry
-from core.routing.router import Router
 from core.agent.runner import AgentRunner
+from core.logging.logger import setup_logging, get_logger
 
 from apps.chainlit_app.ui.upload import handle_uploads  # 기존 업로드 처리 사용
 from apps.chainlit_app.ui.render import render_result
@@ -26,27 +27,32 @@ from agents.dia.agent import DIAAgent
 from agents.logcop.agent import LogCopAgent
 
 
+log = get_logger(__name__)
+_trace_filter = None
+
+
 def build_registry() -> AgentRegistry:
     reg = AgentRegistry()
     reg.register(DIAAgent())
-    # reg.register(LogCopAgent())  # 추후 추가
+    reg.register(LogCopAgent())
     return reg
 
 
 @cl.on_chat_start
 async def on_chat_start():
+    global _trace_filter
     settings = get_settings()
-
-    registry = AgentRegistry()
-    registry.register(DIAAgent())
-    registry.register(LogCopAgent())
-
-    # logcop 같은 추가 agent는 나중에 registry.register로 붙이면 됨
-    # from agents.logcop.agent import LogCopAgent
-    # registry.register(LogCopAgent())
+    registry = build_registry()
 
     cl.user_session.set("settings", settings)
     cl.user_session.set("runner", AgentRunner(registry=registry, settings=settings))
+
+    if _trace_filter is None:
+        _trace_filter = setup_logging(
+            workspace_dir=getattr(settings, "WORKSPACE_DIR", "workspace"),
+            level=logging.INFO,
+        )
+    log.info(f"chainlit chat started with settings: {settings}")
 
 
 def _normalize_uploaded_files(uploaded_files):
@@ -69,7 +75,12 @@ def _normalize_uploaded_files(uploaded_files):
 
 @cl.on_message
 async def on_message(message: cl.Message):
+    global _trace_filter
     settings = get_settings()
+    session_id = cl.user_session.get("id")
+
+    if _trace_filter:
+        _trace_filter.set_trace_id(session_id)
 
     # 1) 업로드 처리 (context 구성)
     uploaded_files = await handle_uploads(message, settings)

@@ -20,11 +20,11 @@
 | Task Name | 설명 | 우선순위 | 상태 |
 |---|---|---:|---|
 | **P2-1-A. File Loader 텍스트 지원 완결** | `load_file()`이 `.log/.txt/.out`을 **kind=text**로 반환. `ToolResult.data.text` 포함. LogCop에서 tail fallback 최소화 | 🔴 High | ✅ 완료 |
-| **P2-1-B. DIA Agent load_file 통합** | DIA의 CSV/PDF 로딩을 `load_file()`로 통일. Agent 내부에서 `pd.read_csv`, `pdfplumber.open` 직접 호출 제거 | 🔴 High | ⏳ 대기 |
-| **P2-1-C. Runner 단 normalize_context 강제** | Runner/UI → Agent 호출 직전에 **반드시** `normalize_context()` 적용. Agent는 dict/raw 입력을 신뢰하지 않음 | 🔴 High | ⏳ 대기 |
+| **P2-1-B. DIA Agent load_file 통합** | DIA의 CSV/PDF 로딩을 `load_file()`로 통일. Agent 내부에서 `pd.read_csv`, `pdfplumber.open` 직접 호출 제거 | 🔴 High | ✅ 완료 |
+| **P2-1-C. Runner 단 normalize_context 강제** | Runner/UI → Agent 호출 직전에 **반드시** `normalize_context()` 적용. Agent는 dict/raw 입력을 신뢰하지 않음 | 🔴 High ✅ 완료 |
 | **P2-1-D. LLM UX 정책 공통화** | `llm_disabled / network_unreachable / missing_api_key / llm_call_failed` 등 상태코드 → UX 문구/이벤트명을 공통 유틸로 표준화 | 🟠 Medium | ⏳ 대기 |
 | **P2-1-E. Phase2 스모크 테스트 고정** | `smoke_context`, `smoke_file_loader`, `smoke_route`를 Phase2 기준으로 고정(텍스트 포함). CI 없이도 로컬에서 동일 결과 | 🟠 Medium | ⏳ 대기 |
-| **P2-1-L. Logging Baseline 추가 (권장 선행)** | 콘솔+파일 로깅, trace_id/session_id 상관관계, runner/router/tool/llm 주요 이벤트 기록. “리팩터링 안전망” | 🔴 High | ⏳ 대기 |
+| **P2-1-L. Logging Baseline 추가 (권장 선행)** | 콘솔+파일 로깅, trace_id/session_id 상관관계, runner/router/tool/llm 주요 이벤트 기록. “리팩터링 안전망” | 🔴 High | ✅ 완료 |
 
 ### Phase 2-1 종료 조건
 - Agent 코드에 **파일 직접 로딩 로직이 없음**(모두 `load_file()` 경유)
@@ -73,6 +73,10 @@
 ---
 
 ## 현재 상태 메모 (업데이트 로그)
+
 - P2-1-A: `load_file()` 텍스트(kind=text) 반환 및 LogCop 연동 테스트 성공(폐쇄망/LLM_ENABLED true/false 모두 확인)
+- P2-1-L: 로깅 베이스라인 구축 완료 - trace_id 지원, RotatingFileHandler, Agent Runner/LLM Client 로깅 통합
+- P2-1-B: DIA Agent `load_file()` 통합 완료 - Agent 내부 파일 직접 로딩 제거
+- P2-1-C: Runner 단 `normalize_context()` 강제 적용 완료 - Agent는 항상 표준화된 AgentContext를 받음
 - LLM: 폐쇄망에서 `network_unreachable`, 설정으로 `llm_disabled` UX 분기 확인
-- 다음 우선 작업: **P2-1-L(로깅) 선행 → P2-1-B/C**
+- 다음 우선 작업: **P2-1-D (LLM UX 공통화) → P2-1-E (스모크 테스트 고정)**

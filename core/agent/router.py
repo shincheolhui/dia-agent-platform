@@ -1,84 +1,107 @@
+# core/agent/router.py
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 
-@dataclass(frozen=True)
+@dataclass
 class RouteDecision:
     agent_id: str
+    confidence: float
     reason: str
-    confidence: float = 0.7
+
 
 LOG_EXTS = {".log", ".txt", ".out"}
+DATA_EXTS = {".csv", ".xlsx", ".xls", ".pdf"}
 
 LOG_KEYWORDS = {
-    # 영문
-    "error", "exception", "stacktrace", "traceback", "caused by", "timeout",
-    # 한글
+    "error", "exception", "stacktrace", "traceback", "caused by",
+    "timeout", "pkix", "ssl", "connection",
     "에러", "오류", "예외", "원인", "장애", "실패",
 }
 
-def _contains_log_keyword(text: str) -> bool:
-    lower = text.lower()
-    return any(k in lower for k in LOG_KEYWORDS)
 
+def _ctx_uploaded_files(context: Any) -> List[Dict[str, Any]]:
+    """
+    context가 AgentContext(표준) 또는 dict(레거시)여도
+    uploaded_files를 list[dict{name,path,mime}] 형태로 뽑아준다.
+    """
+    if context is None:
+        return []
 
-def _ext(path: str) -> str:
-    return Path(path).suffix.lower()
+    # 1) dict legacy
+    if isinstance(context, dict):
+        files = context.get("uploaded_files") or []
+        out: List[Dict[str, Any]] = []
+        for f in files:
+            if isinstance(f, dict):
+                name = f.get("name")
+                path = f.get("path")
+                mime = f.get("mime")
+            else:
+                name = getattr(f, "name", None)
+                path = getattr(f, "path", None)
+                mime = getattr(f, "mime", None)
+            if name and path:
+                out.append({"name": str(name), "path": str(path), "mime": (str(mime) if mime else None)})
+        return out
+
+    # 2) AgentContext 표준(duck typing)
+    files = getattr(context, "uploaded_files", None) or []
+    out2: List[Dict[str, Any]] = []
+    for f in files:
+        if isinstance(f, dict):
+            name = f.get("name")
+            path = f.get("path")
+            mime = f.get("mime")
+        else:
+            name = getattr(f, "name", None)
+            path = getattr(f, "path", None)
+            mime = getattr(f, "mime", None)
+        if name and path:
+            out2.append({"name": str(name), "path": str(path), "mime": (str(mime) if mime else None)})
+    return out2
 
 
 def decide_agent_id(
+    *,
     user_message: str,
-    context: Dict[str, Any],
-    available_agent_ids: List[str],
+    context: Any,
+    available_agent_ids: Sequence[str],
     default_agent_id: str = "dia",
 ) -> RouteDecision:
     """
-    Rule-based auto routing (LLM 없이도 동작하도록).
-    - available_agent_ids에 존재하는 agent만 반환한다.
-    - 없으면 default_agent_id로 fallback.
+    라우팅 규칙:
+    1) 파일 확장자 기반 (우선순위 최상)
+    2) 키워드 기반
+    3) fallback
     """
+    available = list(available_agent_ids or [])
+    if not available:
+        return RouteDecision(agent_id=default_agent_id, confidence=0.1, reason="no available agents; default")
+
+    uploaded_files = _ctx_uploaded_files(context)
     msg = (user_message or "").lower()
 
-    uploaded_files: List[Dict[str, Any]] = context.get("uploaded_files", []) or []
-    file_exts = []
-    for f in uploaded_files:
-        p = f.get("path") or ""
-        if p:
-            file_exts.append(_ext(p))
+    # 1) 파일 확장자 기반
+    if uploaded_files:
+        f0 = uploaded_files[0]
+        ext = Path(str(f0.get("path", ""))).suffix.lower()
 
-    # 0) 파일 기반 라우팅: LOG/TXT/OUT → LOGCOP
-    if any(e in LOG_EXTS for e in file_exts):
-        if "logcop" in available_agent_ids:
-            return RouteDecision(
-                agent_id="logcop",
-                reason=f"uploaded_files ext={sorted(set(file_exts))} → logcop",
-                confidence=0.95,
-            )
+        if ext in LOG_EXTS and "logcop" in available:
+            return RouteDecision(agent_id="logcop", confidence=0.95, reason=f"file_ext={ext} -> logcop")
 
-    # 1) 파일 기반 라우팅: CSV/PDF → DIA
-    if any(e in [".csv", ".xlsx", ".xls", ".pdf"] for e in file_exts):
-        if "dia" in available_agent_ids:
-            return RouteDecision(agent_id="dia", reason=f"uploaded_files ext={sorted(set(file_exts))} → dia", confidence=0.9)
+        if ext in DATA_EXTS and "dia" in available:
+            # csv/xlsx/pdf 등은 DIA 우선
+            return RouteDecision(agent_id="dia", confidence=0.90, reason=f"file_ext={ext} -> dia")
 
-    # 2) 로그 분석 계열 키워드 → logcop (있으면)
-    if _contains_log_keyword(user_message or ""):
-        if "logcop" in available_agent_ids:
-            return RouteDecision(
-                agent_id="logcop",
-                reason="message contains log/error keywords → logcop",
-                confidence=0.8,
-            )
+    # 2) 키워드 기반
+    if any(k in msg for k in LOG_KEYWORDS) and "logcop" in available:
+        return RouteDecision(agent_id="logcop", confidence=0.80, reason="keyword_match -> logcop")
 
-    # 3) 기본 fallback
-    if default_agent_id in available_agent_ids:
-        return RouteDecision(agent_id=default_agent_id, reason=f"fallback → {default_agent_id}", confidence=0.6)
-
-    # 4) 최후 fallback: available 중 첫 번째
-    if available_agent_ids:
-        return RouteDecision(agent_id=available_agent_ids[0], reason="fallback → first available agent", confidence=0.5)
-
-    # 5) 이 경우는 구조적으로 문제(agents 등록 자체가 안 된 상태)
-    return RouteDecision(agent_id="dia", reason="no agents registered; fallback hardcoded to dia", confidence=0.1)
+    # 3) fallback
+    if default_agent_id in available:
+        return RouteDecision(agent_id=default_agent_id, confidence=0.60, reason="fallback default_agent_id")
+    return RouteDecision(agent_id=available[0], confidence=0.55, reason="fallback first_available")

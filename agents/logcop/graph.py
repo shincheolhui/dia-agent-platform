@@ -33,6 +33,31 @@ def _get_data(load_res: Any) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def _get_uploaded_files(context: Any) -> List[Any]:
+    """
+    Phase2 표준: AgentContext 우선, dict는 fallback
+    """
+    if context is None:
+        return []
+    files = getattr(context, "uploaded_files", None)
+    if files is not None:
+        return files or []
+    if isinstance(context, dict):
+        return context.get("uploaded_files", []) or []
+    return []
+
+
+def _get_file_field(f: Any, key: str, default: str = "") -> str:
+    """
+    uploaded_files 요소가 dict/object/dataclass 무엇이든 안전하게 필드를 읽는다.
+    """
+    if isinstance(f, dict):
+        v = f.get(key, default)
+    else:
+        v = getattr(f, key, default)
+    return str(v) if v is not None else str(default)
+
+
 def _rule_based_log_insights(text: str) -> str:
     lowered = (text or "").lower()
     hits = []
@@ -58,11 +83,12 @@ def _rule_based_log_insights(text: str) -> str:
     return "\n".join(lines)
 
 
-async def run_logcop(user_message: str, context: Dict[str, Any], settings: Any) -> AgentResult:
+async def run_logcop(user_message: str, context: Any, settings: Any) -> AgentResult:
     events: List[AgentEvent] = []
     artifacts: List[ArtifactRef] = []
 
-    uploaded_files: List[Dict[str, Any]] = context.get("uploaded_files", []) or []
+    uploaded_files = _get_uploaded_files(context)
+
     events.append(AgentEvent(type="info", name="planner", message="[Planner] 로그 분석 요청을 해석합니다."))
     events.append(AgentEvent(type="info", name="executor", message="[Executor] 로그/텍스트를 수집하고 요약을 생성합니다."))
 
@@ -72,8 +98,8 @@ async def run_logcop(user_message: str, context: Dict[str, Any], settings: Any) 
     # 1) 파일 우선 (✅ load_file만 사용)
     if uploaded_files:
         f0 = uploaded_files[0]
-        path = str(f0.get("path", ""))
-        name = str(f0.get("name", Path(path).name))
+        path = _get_file_field(f0, "path", "")
+        name = _get_file_field(f0, "name", Path(path).name if path else "")
 
         load_res = load_file(path)
         ok = bool(getattr(load_res, "ok", False))
@@ -196,4 +222,5 @@ async def run_logcop(user_message: str, context: Dict[str, Any], settings: Any) 
         text="LogCop Agent 실행 완료입니다.\n- 산출물을 확인하세요.",
         events=events,
         artifacts=artifacts,
+        meta={"agent_id": "logcop", "mode": "mvp"},
     )

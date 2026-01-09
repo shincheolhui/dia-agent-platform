@@ -13,6 +13,7 @@ workspace/uploads/
 
 # Chainlit
 .chainlit/
+chainlit_output.txt
 
 # OS/IDE
 .DS_Store

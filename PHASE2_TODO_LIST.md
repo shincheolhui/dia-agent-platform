@@ -21,9 +21,9 @@
 |---|---|---:|---|
 | **P2-1-A. File Loader 텍스트 지원 완결** | `load_file()`이 `.log/.txt/.out`을 **kind=text**로 반환. `ToolResult.data.text` 포함. LogCop에서 tail fallback 최소화 | 🔴 High | ✅ 완료 |
 | **P2-1-B. DIA Agent load_file 통합** | DIA의 CSV/PDF 로딩을 `load_file()`로 통일. Agent 내부에서 `pd.read_csv`, `pdfplumber.open` 직접 호출 제거 | 🔴 High | ✅ 완료 |
-| **P2-1-C. Runner 단 normalize_context 강제** | Runner/UI → Agent 호출 직전에 **반드시** `normalize_context()` 적용. Agent는 dict/raw 입력을 신뢰하지 않음 | 🔴 High ✅ 완료 |
-| **P2-1-D. LLM UX 정책 공통화** | `llm_disabled / network_unreachable / missing_api_key / llm_call_failed` 등 상태코드 → UX 문구/이벤트명을 공통 유틸로 표준화 | 🟠 Medium | ⏳ 대기 |
-| **P2-1-E. Phase2 스모크 테스트 고정** | `smoke_context`, `smoke_file_loader`, `smoke_route`를 Phase2 기준으로 고정(텍스트 포함). CI 없이도 로컬에서 동일 결과 | 🟠 Medium | ⏳ 대기 |
+| **P2-1-C. Runner 단 normalize_context 강제** | Runner/UI → Agent 호출 직전에 **반드시** `normalize_context()` 적용. Agent는 dict/raw 입력을 신뢰하지 않음 | 🔴 High | ✅ 완료 |
+| **P2-1-D. LLM UX 정책 공통화** | `llm_disabled / network_unreachable / missing_api_key / llm_call_failed` 등 상태코드 → UX 문구/이벤트명을 공통 유틸로 표준화 | 🟠 Medium | ✅ 완료 |
+| **P2-1-E. Phase2 스모크 테스트 고정** | `smoke_context`, `smoke_file_loader`, `smoke_route`를 Phase2 기준으로 고정(텍스트 포함). CI 없이도 로컬에서 동일 결과 | 🟠 Medium | ✅ 완료 |
 | **P2-1-L. Logging Baseline 추가 (권장 선행)** | 콘솔+파일 로깅, trace_id/session_id 상관관계, runner/router/tool/llm 주요 이벤트 기록. “리팩터링 안전망” | 🔴 High | ✅ 완료 |
 
 ### Phase 2-1 종료 조건
@@ -78,5 +78,6 @@
 - P2-1-L: 로깅 베이스라인 구축 완료 - trace_id 지원, RotatingFileHandler, Agent Runner/LLM Client 로깅 통합
 - P2-1-B: DIA Agent `load_file()` 통합 완료 - Agent 내부 파일 직접 로딩 제거
 - P2-1-C: Runner 단 `normalize_context()` 강제 적용 완료 - Agent는 항상 표준화된 AgentContext를 받음
-- LLM: 폐쇄망에서 `network_unreachable`, 설정으로 `llm_disabled` UX 분기 확인
-- 다음 우선 작업: **P2-1-D (LLM UX 공통화) → P2-1-E (스모크 테스트 고정)**
+- P2-1-D: LLM UX 정책 공통화 완료 - `core/llm/ux.py` 모듈 생성(LLMUX dataclass, build_llm_ux/build_llm_event 함수), LLM 상태 코드(ok/llm_disabled/network_unreachable/missing_api_key/llm_call_failed)를 예외가 아닌 UX 상태로 처리, DIA/LogCop Agent 간 Planner→Executor→Reviewer UX 흐름 통일, executor.llm_used/executor.llm_fallback 이벤트로 LLM 사용 여부 명확화
+- P2-1-E: Phase2 스모크 테스트 고정 완료 - `smoke_context`, `smoke_file_loader`, `smoke_route` 3개 테스트 및 실행 스크립트 추가, 테스트 fixtures 준비, `normalize_context()` session_id 기본값 처리 개선
+- 다음 우선 작업: **P2-2-A (Planner/Executor/Reviewer 구조 명확화)**

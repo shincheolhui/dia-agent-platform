@@ -13,8 +13,9 @@ from core.utils.time import ts
 
 from core.llm.client import LLMClient
 from core.llm.prompts import load_prompt, default_insight_prompt
+from core.llm.ux import build_llm_ux, build_llm_event
 from core.llm.validators import ensure_sections
-from core.tools.file_loader import load_file  # ✅ 단일 진입점
+from core.tools.file_loader import load_file
 
 from agents.dia.report import ReportInputs, build_markdown_report
 from agents.dia.insights import rule_based_insights
@@ -263,30 +264,14 @@ async def run_dia(user_message: str, context: Any, settings: Any) -> AgentResult
             )
 
             llm_res = await llm_client.generate(system_prompt=system_prompt, user_prompt=user_prompt)
+            llm_ux = build_llm_ux(llm_res)
+            events.append(build_llm_event(llm_ux))
 
-            if llm_res.ok:
-                llm_hint = "- LLM: 적용됨"
+            if llm_ux.ok:
                 llm_section = ensure_sections(llm_res.content)
-                llm_debug = ""
             else:
                 llm_section = rule_based_insights(df)
-
-                if llm_res.error == "network_unreachable":
-                    llm_hint = "- LLM: 미적용 (폐쇄망/네트워크 제한)"
-                elif llm_res.error == "llm_disabled":
-                    llm_hint = "- LLM: 미적용 (LLM_ENABLED=false)"
-                elif llm_res.error == "missing_api_key":
-                    llm_hint = "- LLM: 미적용 (API Key 미설정)"
-                else:
-                    llm_hint = "- LLM: 미적용 (호출 실패)"
-
-                llm_debug = ""
-                if llm_res.last_error:
-                    llm_debug = (
-                        f"\n\n<details><summary>LLM debug</summary>\n\n"
-                        f"- last_error: {llm_res.last_error}\n\n</details>\n"
-                    )
-
+            
             report_md = build_markdown_report(
                 ReportInputs(
                     user_request=user_message,
@@ -296,7 +281,7 @@ async def run_dia(user_message: str, context: Any, settings: Any) -> AgentResult
                     head_md=head,
                     describe_md=desc_md,
                     plot_file=(plot_path.name if plot_path else None),
-                    llm_insights_md=(llm_hint + "\n\n" + llm_section + llm_debug),
+                    llm_insights_md=(llm_ux.hint_line + "\n\n" + llm_section + llm_ux.debug_details_md),
                 )
             )
 

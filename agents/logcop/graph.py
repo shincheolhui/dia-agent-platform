@@ -10,7 +10,8 @@ from core.utils.time import ts
 
 from core.llm.client import LLMClient
 from core.llm.prompts import load_prompt
-from core.tools.file_loader import load_file  # ✅ 단일 진입점
+from core.llm.ux import build_llm_ux, build_llm_event
+from core.tools.file_loader import load_file
 
 
 def _artifact_dir(settings: Any) -> Path:
@@ -168,39 +169,13 @@ async def run_logcop(user_message: str, context: Any, settings: Any) -> AgentRes
     )
 
     llm_res = await llm_client.generate(system_prompt=system_prompt, user_prompt=user_prompt)
+    llm_ux = build_llm_ux(llm_res)
+    events.append(build_llm_event(llm_ux))
 
-    llm_hint_line = ""
-    llm_debug_line = ""
-
-    if llm_res.ok:
-        events.append(AgentEvent(type="info", name="executor.llm_used", message="[Executor] LLM 인사이트 생성 완료"))
+    if llm_ux.ok:
         body = llm_res.content
-        llm_hint_line = "- LLM: 적용됨"
     else:
-        events.append(
-            AgentEvent(
-                type="warning",
-                name="executor.llm_fallback",
-                message=f"[Executor] {llm_res.content} ({llm_res.error})",
-            )
-        )
-
         body = _rule_based_log_insights(log_text) + "\n\n" + llm_res.content
-
-        if llm_res.error == "network_unreachable":
-            llm_hint_line = "- LLM: 미적용 (폐쇄망/네트워크 제한)"
-        elif llm_res.error == "llm_disabled":
-            llm_hint_line = "- LLM: 미적용 (LLM_ENABLED=false)"
-        elif llm_res.error == "missing_api_key":
-            llm_hint_line = "- LLM: 미적용 (API Key 미설정)"
-        else:
-            llm_hint_line = "- LLM: 미적용 (호출 실패)"
-
-        if llm_res.last_error:
-            llm_debug_line = (
-                f"\n\n<details><summary>LLM debug</summary>\n\n"
-                f"- last_error: {llm_res.last_error}\n\n</details>\n"
-            )
 
     report = (
         "# LogCop 분석 보고서\n\n"
@@ -208,10 +183,10 @@ async def run_logcop(user_message: str, context: Any, settings: Any) -> AgentRes
         f"{user_message}\n\n"
         "## 입력\n"
         f"{source_note}\n"
-        f"{llm_hint_line}\n"
+        f"{llm_ux.hint_line}\n"
         "---\n\n"
         f"{body}\n"
-        f"{llm_debug_line}\n"
+        f"{llm_ux.debug_details_md}\n"
     )
 
     out_path = _save_text(settings, "logcop_report", report)

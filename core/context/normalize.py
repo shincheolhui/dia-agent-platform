@@ -36,6 +36,15 @@ def _as_uploaded_file_ref(x: Any) -> Optional[UploadedFileRef]:
     return None
 
 
+DEFAULT_SESSION_ID = "-"
+
+def _coerce_str(v, default=DEFAULT_SESSION_ID) -> str:
+    if v is None:
+        return default
+    s = str(v).strip()
+    return s if s else default
+
+
 def normalize_context(raw: Optional[Dict[str, Any]]) -> AgentContext:
     """
     Runner/UI에서 전달되는 context(dict)를 AgentContext로 표준화.
@@ -43,7 +52,7 @@ def normalize_context(raw: Optional[Dict[str, Any]]) -> AgentContext:
     - raw가 None이면 빈 컨텍스트 반환
     """
     raw = raw or {}
-    session_id = raw.get("session_id")
+    session_id = _coerce_str(raw.get("session_id"))
 
     uploaded_files_raw: List[Any] = raw.get("uploaded_files") or []
     uploaded_files: List[UploadedFileRef] = []

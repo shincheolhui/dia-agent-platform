@@ -1,0 +1,4 @@
+Smoke Test Sample Text File
+---------------------------
+This file is used to verify basic file upload and encoding handling.
+Korean test: 한글 정상 출력 여부 확인

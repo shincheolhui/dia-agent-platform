@@ -1,0 +1,4 @@
+2026-01-10 10:15:01 INFO  Application started
+2026-01-10 10:15:02 INFO  Connected to database
+2026-01-10 10:15:03 WARN  Cache miss for key=user:1001
+2026-01-10 10:15:04 ERROR Failed to load configuration file

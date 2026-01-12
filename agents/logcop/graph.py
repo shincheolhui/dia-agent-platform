@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from core.agent.reviewer import ReviewSpec, review_execution
 from core.agent.stages import (
     StageContext,
     Plan,
@@ -264,25 +265,68 @@ async def _execute(sc: StageContext, plan: Plan) -> tuple[ExecutionResult, List[
 
 def _review(sc: StageContext, plan: Plan, exec_res: ExecutionResult) -> tuple[ReviewResult, List[AgentEvent]]:
     events: List[AgentEvent] = []
-    events.append(step_start("reviewer", "결과 검증 시작"))
+    events.append(step_start("reviewer", "결과 검증 시작(P2-2-B)"))
 
-    issues: List[str] = []
-    followups: List[str] = []
+    # LogCop 스펙: artifact 1개 + markdown 필수.
+    # 로그는 “오류 없음”도 정상 결과일 수 있으므로 placeholder 마커는 최소화.
+    spec = ReviewSpec(
+        require_artifacts=True,
+        min_artifacts=1,
+        require_markdown=True,
+        markdown_min_chars=50,                  # LogCop은 DIA보다 낮춰도 됨
+        markdown_disallow_placeholders=False,   # LogCop은 placeholder 금지 약화
+        allow_approve_when_exec_failed=False,
+    )
 
-    if not exec_res.artifacts:
-        issues.append("산출물이 생성되지 않았습니다.")
-        followups.append("원본 로그 파일 또는 더 긴 구간(전후 수백 라인)을 다시 업로드해 주세요.")
+    outcome = review_execution(
+        spec=spec,
+        exec_ok=bool(exec_res.ok),
+        exec_text=exec_res.text,
+        artifacts=exec_res.artifacts or [],
+        error_code=exec_res.error_code,
+        extra={
+            "intent": getattr(plan, "intent", None),
+            "file_kind": exec_res.file_kind,
+        },
+    )
 
-    approved = len(issues) == 0
-    if approved:
-        events.append(info("reviewer.approve", "MVP: 산출물 생성 확인 → 승인"))
+    if outcome.approved:
+        events.append(info("reviewer.approve", "Reviewer 품질 게이트 통과 → 승인"))
+        events.append(evlog("reviewer.details", _format_review_details(outcome.details)))
         events.append(step_end("reviewer", "승인"))
     else:
-        events.append(warn("reviewer.reject", "품질 게이트 실패"))
-        events.append(evlog("reviewer.issues", "\n".join(f"- {x}" for x in issues)))
+        events.append(warn("reviewer.reject", "Reviewer 품질 게이트 실패 → 거절"))
+        events.append(evlog("reviewer.issues", _format_review_issues(outcome.issues)))
+        if outcome.followups:
+            events.append(evlog("reviewer.followups", _format_review_followups(outcome.followups)))
         events.append(step_end("reviewer", "거절"))
 
-    return ReviewResult(approved=approved, issues=issues, followups=followups), events
+    return ReviewResult(
+        approved=outcome.approved,
+        issues=outcome.issues,
+        followups=outcome.followups,
+    ), events
+
+
+def _format_review_issues(issues: List[str]) -> str:
+    if not issues:
+        return "(none)"
+    return "\n".join([f"- {x}" for x in issues])
+
+
+def _format_review_followups(followups: List[str]) -> str:
+    if not followups:
+        return "(none)"
+    return "\n".join([f"- {x}" for x in followups])
+
+
+def _format_review_details(details: Dict[str, Any]) -> str:
+    if not details:
+        return "(none)"
+    lines = []
+    for k in sorted(details.keys()):
+        lines.append(f"- {k}: {details[k]}")
+    return "\n".join(lines)
 
 
 async def run_logcop(user_message: str, context: Dict[str, Any], settings: Any) -> AgentResult:

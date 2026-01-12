@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 import matplotlib.pyplot as plt
 
+from core.agent.reviewer import ReviewSpec, review_execution
 from core.agent.stages import (
     StageContext,
     Plan,
@@ -18,7 +19,6 @@ from core.agent.stages import (
     log as evlog,
     warn,
     build_agent_meta,
-    # ✅ P2-2-A: UploadedFileRef/dict 혼용 안전 접근 헬퍼 (stages.py에 이미 추가했다고 하셨음)
     _file_get,
     _file_name_and_path,
 )
@@ -444,31 +444,69 @@ async def _execute(sc: StageContext, plan: Plan) -> tuple[ExecutionResult, List[
 
 def _review(sc: StageContext, plan: Plan, exec_res: ExecutionResult) -> tuple[ReviewResult, List[AgentEvent]]:
     events: List[AgentEvent] = []
-    events.append(step_start("reviewer", "결과 검증 시작"))
+    events.append(step_start("reviewer", "결과 검증 시작(P2-2-B)"))
 
-    issues: List[str] = []
-    followups: List[str] = []
+    # DIA 기본 스펙: 최소 1개 artifact, markdown 필수
+    spec = ReviewSpec(
+        require_artifacts=True,
+        min_artifacts=1,
+        require_markdown=True,
+        markdown_min_chars=80,
+        markdown_disallow_placeholders=True,
+        # DIA는 exec 실패 시 기본 reject
+        allow_approve_when_exec_failed=False,
+    )
 
-    # MVP Lite 게이트(실질화는 P2-2-B에서 강화)
-    if not exec_res.artifacts:
-        issues.append("산출물이 생성되지 않았습니다.")
-        followups.append("CSV 또는 PDF 파일을 다시 업로드해 주세요.")
-    else:
-        # markdown 산출물 최소 1개는 있어야 함
-        has_md = any((a.kind == "markdown") for a in (exec_res.artifacts or []))
-        if not has_md:
-            issues.append("Markdown 보고서 산출물이 없습니다.")
+    outcome = review_execution(
+        spec=spec,
+        exec_ok=bool(exec_res.ok),
+        exec_text=exec_res.text,
+        artifacts=exec_res.artifacts or [],
+        error_code=exec_res.error_code,
+        extra={
+            "intent": getattr(plan, "intent", None),
+            "file_kind": exec_res.file_kind,
+        },
+    )
 
-    approved = len(issues) == 0
-    if approved:
-        events.append(info("reviewer.approve", "MVP: 산출물 생성 확인 → 승인"))
+    # 이벤트 출력 표준화
+    if outcome.approved:
+        events.append(info("reviewer.approve", "Reviewer 품질 게이트 통과 → 승인"))
+        events.append(evlog("reviewer.details", _format_review_details(outcome.details)))
         events.append(step_end("reviewer", "승인"))
     else:
-        events.append(warn("reviewer.reject", "품질 게이트 실패"))
-        events.append(evlog("reviewer.issues", "\n".join(f"- {x}" for x in issues)))
+        events.append(warn("reviewer.reject", "Reviewer 품질 게이트 실패 → 거절"))
+        events.append(evlog("reviewer.issues", _format_review_issues(outcome.issues)))
+        if outcome.followups:
+            events.append(evlog("reviewer.followups", _format_review_followups(outcome.followups)))
         events.append(step_end("reviewer", "거절"))
 
-    return ReviewResult(approved=approved, issues=issues, followups=followups), events
+    return ReviewResult(
+        approved=outcome.approved,
+        issues=outcome.issues,
+        followups=outcome.followups,
+    ), events
+
+
+def _format_review_issues(issues: List[str]) -> str:
+    if not issues:
+        return "(none)"
+    return "\n".join([f"- {x}" for x in issues])
+
+
+def _format_review_followups(followups: List[str]) -> str:
+    if not followups:
+        return "(none)"
+    return "\n".join([f"- {x}" for x in followups])
+
+
+def _format_review_details(details: Dict[str, Any]) -> str:
+    if not details:
+        return "(none)"
+    lines = []
+    for k in sorted(details.keys()):
+        lines.append(f"- {k}: {details[k]}")
+    return "\n".join(lines)
 
 
 async def run_dia(user_message: str, context: Dict[str, Any], settings: Any) -> AgentResult:

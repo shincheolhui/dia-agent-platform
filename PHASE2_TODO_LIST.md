@@ -47,7 +47,7 @@
 | Task Name | 설명 | 우선순위 | 상태 |
 |---|---|---:|---|
 | **P2-2-A. Planner/Executor/Reviewer 구조 명확화** | 현재 이벤트 나열 수준 → **명시적 단계 전환**(state-like)으로 정리. 각 단계 입력/출력 정의 | 🔴 High | ✅ 완료 |
-| **P2-2-B. Reviewer 실질화 (Lite)** | 자동 승인 → 최소 품질 게이트: 산출물 존재/비어있음/실패 여부/필수 섹션 유무 점검 | 🔴 High | ⏳ 대기 |
+| **P2-2-B. Reviewer 실질화 (Lite)** | 자동 승인 → 최소 품질 게이트: 산출물 존재/비어있음/실패 여부/필수 섹션 유무 점검 | 🔴 High | ✅ 완료 |
 | **P2-2-C. AgentResult meta 표준화 확장** | `agent_id, mode, file_kind, llm_used, fallback_reason, artifacts_count` 등을 meta로 통일 | 🟠 Medium | ⏳ 대기 |
 | **P2-2-D. Rule-based Insight 품질 상향** | CSV/Log 규칙 인사이트를 “LLM 부재 환경에서도 납득 가능” 수준으로 개선 (근거/액션 포함) | 🟠 Medium | ⏳ 대기 |
 
@@ -81,4 +81,5 @@
 - P2-1-D: LLM UX 정책 공통화 완료 - `core/llm/ux.py` 모듈 생성(LLMUX dataclass, build_llm_ux/build_llm_event 함수), LLM 상태 코드(ok/llm_disabled/network_unreachable/missing_api_key/llm_call_failed)를 예외가 아닌 UX 상태로 처리, DIA/LogCop Agent 간 Planner→Executor→Reviewer UX 흐름 통일, executor.llm_used/executor.llm_fallback 이벤트로 LLM 사용 여부 명확화
 - P2-1-E: Phase2 스모크 테스트 고정 완료 - `smoke_context`, `smoke_file_loader`, `smoke_route` 3개 테스트 및 실행 스크립트 추가, 테스트 fixtures 준비, `normalize_context()` session_id 기본값 처리 개선
 - P2-2-A: Planner/Executor/Reviewer 구조 명확화 완료 - `core/agent/stages.py` 모듈 생성(StageContext, Plan, ExecutionResult, ReviewResult dataclass 정의), 표준 이벤트 헬퍼 함수(step_start/step_end/info/log/warn/error), `build_agent_meta()` 함수로 메타데이터 표준화, 파일 접근 헬퍼(`_file_get`, `_file_name_and_path`), DIA/LogCop Agent 모두 `_plan()/_execute()/_review()` 함수로 명시적 단계 분리 및 타입 안전성 확보, 각 단계의 입력/출력이 명확한 타입으로 정의됨
-- 다음 우선 작업: **P2-2-B (Reviewer 실질화)**
+- P2-2-B: Reviewer 실질화 완료 - `core/agent/reviewer.py` 모듈 생성(ReviewSpec, ReviewOutcome dataclass, `review_execution()` 공통 Reviewer 엔진), 최소 품질 게이트 구현(산출물 존재 여부, markdown 필수 여부, markdown 최소 길이 체크, placeholder 탐지, 실행 실패 여부 점검), DIA/LogCop Agent 모두 `_review()` 함수에서 `review_execution()` 공통 엔진 사용하도록 통합, Agent별 스펙 차별화(DIA: markdown_min_chars=80, placeholder 금지 / LogCop: markdown_min_chars=50, placeholder 금지 약화), 승인/거절 판단 및 이슈/후속 조치 메시지 표준화
+- 다음 우선 작업: **P2-2-C (AgentResult meta 표준화 확장)**

@@ -28,12 +28,15 @@ def main() -> int:
     from core.tests.smoke_context import smoke_context
     from core.tests.smoke_route import smoke_route
     from core.tests.smoke_meta import smoke_meta
+    from core.tests.smoke_audit import smoke_audit
+
 
     ok = True
     ok &= _run_one("smoke_file_loader", smoke_file_loader)
     ok &= _run_one("smoke_context", smoke_context)
     ok &= _run_one("smoke_route", smoke_route)
     ok &= _run_one("smoke_meta", smoke_meta)
+    ok &= _run_one("smoke_audit", smoke_audit)
 
     print("----")
     if ok:

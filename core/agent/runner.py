@@ -1,103 +1,139 @@
 # core/agent/runner.py
 from __future__ import annotations
 
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, Optional
 
-from core.agent.registry import AgentRegistry
-from core.agent.router import decide_agent_id
-from core.artifacts.types import AgentEvent, AgentResult
+from core.agent.audit import export_and_append
+from core.agent.stages import log as evlog, warn
+from core.artifacts.types import AgentResult
 from core.context import normalize_context
-from core.logging.logger import get_logger, set_trace_id
 
-log = get_logger(__name__)
+
+@dataclass
+class RouteDecision:
+    agent_id: str
+    confidence: float
+    reason: str
 
 
 class AgentRunner:
-    def __init__(self, registry: AgentRegistry, settings: Any):
+    """
+    기존 앱(apps/chainlit_app/app.py)과 호환되는 시그니처 유지:
+      AgentRunner(registry=..., settings=...)
+
+    - registry는 agent_id -> agent_instance(or factory) 를 제공한다고 가정
+    - agent는 .run(user_message, context, settings) async 메서드를 제공
+    """
+
+    def __init__(self, *, registry: Any, settings: Any):
         self.registry = registry
         self.settings = settings
 
-    async def run(
-        self,
-        user_message: str,
-        context: Optional[Dict[str, Any]] = None,
-    ) -> AgentResult:
-        # 0) context 표준화 (Phase2-1 핵심): dict로 내리지 말고 AgentContext 유지
-        ctx = normalize_context(context)
-        trace_id = str(ctx.session_id or "no-session")
-
-        # 전역 trace_id 갱신 (formatter에서 trace_id 필요)
-        set_trace_id(trace_id)
-
-        log.info(
-            "runner.start message_len=%s uploaded_files=%s",
-            len(user_message or ""),
-            len(ctx.uploaded_files or []),
-        )
-
-        active = getattr(self.settings, "ACTIVE_AGENT", "dia")
-        available = self.registry.list_ids()
-
-        # 1) agent 선택 (라우팅)
-        if active == "auto":
-            decision = decide_agent_id(
-                user_message=user_message,
-                context=ctx,  # ✅ AgentContext
-                available_agent_ids=available,
-                default_agent_id="dia",
-            )
-            log.info(
-                "runner.route agent=%s confidence=%s reason=%s",
-                decision.agent_id,
-                decision.confidence,
-                decision.reason,
-            )
-
-            agent_id = decision.agent_id
-            route_event = AgentEvent(
-                type="info",
-                name="router",
-                message=f"[router] agent={agent_id} (confidence={decision.confidence}) reason={decision.reason}",
-            )
+    def route(self, ctx: Any) -> RouteDecision:
+        """
+        기존 정책(확장자 기반) 그대로:
+        - .log -> logcop
+        - .csv/.pdf -> dia
+        - default -> dia
+        """
+        uploaded = []
+        if isinstance(ctx, dict):
+            uploaded = ctx.get("uploaded_files") or []
         else:
-            agent_id = active
-            route_event = AgentEvent(
-                type="info",
-                name="router",
-                message=f"[router] ACTIVE_AGENT fixed to '{agent_id}'",
+            uploaded = getattr(ctx, "uploaded_files", None) or []
+
+        ext = ""
+        if uploaded:
+            f0 = uploaded[0]
+            path = ""
+            if isinstance(f0, dict):
+                path = str(f0.get("path") or "")
+            else:
+                path = str(getattr(f0, "path", "") or "")
+            ext = Path(path).suffix.lower()
+
+        if ext == ".log":
+            return RouteDecision(agent_id="logcop", confidence=0.95, reason="file_ext=.log -> logcop")
+        if ext in (".csv", ".pdf"):
+            return RouteDecision(agent_id="dia", confidence=0.9, reason=f"file_ext={ext} -> dia")
+        return RouteDecision(agent_id="dia", confidence=0.6, reason="default -> dia")
+
+    def _get_agent(self, agent_id: str) -> Any:
+        """
+        registry 구현 다양성 방어:
+        - dict registry: registry[agent_id]
+        - object registry: registry.get(agent_id) 또는 registry.resolve(agent_id) 등
+        - callable(factory)인 경우 호출하여 instance 생성
+        """
+        agent = None
+
+        if isinstance(self.registry, dict):
+            agent = self.registry.get(agent_id)
+        else:
+            # 흔한 패턴들 순서대로 시도
+            if hasattr(self.registry, "get"):
+                try:
+                    agent = self.registry.get(agent_id)
+                except Exception:
+                    agent = None
+            if agent is None and hasattr(self.registry, "resolve"):
+                try:
+                    agent = self.registry.resolve(agent_id)
+                except Exception:
+                    agent = None
+
+        if agent is None:
+            raise KeyError(f"agent not found in registry: {agent_id}")
+
+        # factory면 생성
+        if callable(agent) and not hasattr(agent, "run"):
+            agent = agent()
+
+        return agent
+
+    async def run(self, user_message: str, context: Optional[Dict[str, Any]] = None) -> AgentResult:
+        """
+        실행 흐름:
+        - context normalize
+        - route
+        - agent.run
+        - (P2-2-D) audit export/jsonl append (best-effort)
+        """
+        ctx = normalize_context(context)
+
+        decision = self.route(ctx)
+        agent = self._get_agent(decision.agent_id)
+
+        # agent 실행
+        result: AgentResult = await agent.run(user_message=user_message, context=ctx, settings=self.settings)
+
+        # -------------------------
+        # P2-2-D: audit export (best-effort)
+        # -------------------------
+        try:
+            json_path, jsonl_path, entry = export_and_append(
+                result=result,
+                user_message=user_message,
+                context=ctx,
+                settings=self.settings,
             )
 
-        agent = self.registry.get(agent_id)
-        if not agent:
-            fallback_id = "dia" if self.registry.has("dia") else (available[0] if available else None)
-            if not fallback_id:
-                return AgentResult(
-                    text="실행 가능한 agent가 등록되어 있지 않습니다. agents 등록을 확인하세요.",
-                    events=[
-                        route_event,
-                        AgentEvent(type="error", name="router", message="no agents registered"),
-                    ],
-                    artifacts=[],
-                    meta={"ok": False, "error": "no_agents"},
-                )
-            agent = self.registry.get(fallback_id)
-            agent_id = fallback_id
-            route_event = AgentEvent(
-                type="warning",
-                name="router",
-                message=f"[router] requested agent not found; fallback to '{agent_id}'",
-            )
+            # 이벤트로 남김(Chainlit UI에서 확인 가능)
+            if json_path or jsonl_path:
+                msg = "audit saved"
+                if json_path:
+                    msg += f" json={json_path.name}"
+                if jsonl_path:
+                    msg += f" jsonl={jsonl_path.name}"
+                result.events.append(evlog("audit.saved", msg))
+            else:
+                if entry and entry.get("disabled") is True:
+                    result.events.append(evlog("audit.disabled", "AUDIT_ENABLED=false"))
 
-        # 2) agent 실행
-        result = await agent.run(user_message=user_message, context=ctx, settings=self.settings)
+        except Exception as e:
+            # audit 실패는 전체 실행을 깨지 않음
+            result.events.append(warn("audit.failed", f"audit export failed: {type(e).__name__}: {e}"))
 
-        log.info(
-            "runner.done agent=%s artifacts=%s events=%s",
-            (result.meta.get("agent_id") if result.meta else "?"),
-            len(result.artifacts or []),
-            len(result.events or []),
-        )
-
-        # 3) 라우팅 이벤트를 항상 맨 앞에 prepend
-        result.events = [route_event] + (result.events or [])
         return result

@@ -119,6 +119,26 @@ def _get_uploaded_files(context: Any) -> List[Any]:
     return v if isinstance(v, list) else []
 
 
+def _normalize_llm_meta(llm_res: Any, settings: Any) -> tuple[bool, str, Optional[str], Optional[str]]:
+    """
+    returns: (llm_used, llm_status, llm_reason, llm_model)
+    llm_status: "ok" | "skipped" | "failed"
+    """
+    ok = bool(getattr(llm_res, "ok", False))
+    err = getattr(llm_res, "error", None)
+    model = getattr(llm_res, "model", None) or getattr(settings, "PRIMARY_MODEL", None)
+
+    if ok:
+        return True, "ok", None, model
+
+    # 실패/스킵 구분
+    if err in ("llm_disabled", "missing_api_key"):
+        return False, "skipped", err, model
+
+    # network_unreachable, llm_call_failed, timeout 등은 failed
+    return False, "failed", (err or "llm_call_failed"), model
+
+
 def _plan(sc: StageContext) -> tuple[Plan, List[AgentEvent]]:
     events: List[AgentEvent] = []
     events.append(step_start("planner", "요청 해석 및 작업 분해 시작"))
@@ -129,11 +149,11 @@ def _plan(sc: StageContext) -> tuple[Plan, List[AgentEvent]]:
     notes: Dict[str, Any] = {"has_file": has_file, "uploaded_files_count": len(uploaded_files)}
     if has_file:
         f0 = uploaded_files[0]
-        file_name, file_path = _file_name_and_path(f0)
+        file_name, file_path, file_ext, file_mime = _file_name_and_path(f0)
         notes["first_file_name"] = file_name
         notes["first_file_path"] = file_path
-        notes["first_file_ext"] = str(Path(str(file_path or "")).suffix).lower()
-        notes["first_file_mime"] = _file_get(f0, "mime")
+        notes["first_file_ext"] = file_ext
+        notes["first_file_mime"] = file_mime
 
     plan = Plan(
         intent="data_inspection",
@@ -207,7 +227,7 @@ async def _execute(sc: StageContext, plan: Plan) -> tuple[ExecutionResult, List[
     f0 = uploaded_files[0]
 
     # ✅ dict / UploadedFileRef 모두 대응 (stages.py 헬퍼)
-    file_name, file_path = _file_name_and_path(f0)
+    file_name, file_path, file_ext, file_mime = _file_name_and_path(f0)
 
     load_res = load_file(file_path)
     ok = bool(_get_attr(load_res, "ok", False))
@@ -313,34 +333,28 @@ async def _execute(sc: StageContext, plan: Plan) -> tuple[ExecutionResult, List[
         )
 
         llm_res = await llm_client.generate(system_prompt=system_prompt, user_prompt=user_prompt)
-
+        llm_used, llm_status, llm_reason, llm_model = _normalize_llm_meta(llm_res, sc.settings)
         llm_hint_line = ""
         llm_debug_line = ""
+        error_code: Optional[str] = None
 
-        if llm_res.ok:
-            llm_used = True
+        if llm_used:
             events.append(info("executor.llm.used", "LLM 인사이트 생성 완료"))
             llm_section = ensure_sections(llm_res.content)
             llm_hint_line = "- LLM: 적용됨"
         else:
-            error_code = llm_res.error
-            events.append(warn("executor.llm.skipped", f"{llm_res.content} ({llm_res.error})"))
+            error_code = llm_reason  # meta의 error_code에 반영하고 싶다면 유지
+            events.append(warn("executor.llm.skipped", f"{llm_res.content} ({llm_reason})"))
             llm_section = rule_based_insights(df)
 
-            if llm_res.error == "network_unreachable":
+            if llm_reason == "network_unreachable":
                 llm_hint_line = "- LLM: 미적용 (폐쇄망/네트워크 제한)"
-            elif llm_res.error == "llm_disabled":
+            elif llm_reason == "llm_disabled":
                 llm_hint_line = "- LLM: 미적용 (LLM_ENABLED=false)"
-            elif llm_res.error == "missing_api_key":
+            elif llm_reason == "missing_api_key":
                 llm_hint_line = "- LLM: 미적용 (API Key 미설정)"
             else:
                 llm_hint_line = "- LLM: 미적용 (호출 실패)"
-
-            if llm_res.last_error:
-                llm_debug_line = (
-                    "\n\n<details><summary>LLM debug</summary>\n\n"
-                    f"- last_error: {llm_res.last_error}\n\n</details>\n"
-                )
 
         report_md = build_markdown_report(
             ReportInputs(
@@ -374,6 +388,13 @@ async def _execute(sc: StageContext, plan: Plan) -> tuple[ExecutionResult, List[
                 llm_used=llm_used,
                 file_kind="csv",
                 error_code=error_code,
+                llm_status=llm_status,
+                llm_reason=llm_reason,
+                llm_model=llm_model,
+                debug={
+                    "loader_summary": summary,
+                    "llm_last_error": getattr(llm_res, "last_error", None),
+                }
             ),
             events,
         )
@@ -536,15 +557,20 @@ async def run_dia(user_message: str, context: Dict[str, Any], settings: Any) -> 
 
     meta = build_agent_meta(
         agent_id="dia",
-        mode="p2-2-a",
+        mode="p2-2-c",
         file_kind=exec_res.file_kind,
         llm_used=exec_res.llm_used,
         artifacts_count=len(all_artifacts),
         approved=review_res.approved,
         error_code=exec_res.error_code,
+        llm_status=exec_res.llm_status,
+        llm_reason=exec_res.llm_reason,
+        llm_model=exec_res.llm_model,
+        review_issues=review_res.issues,
+        review_followups=review_res.followups,
+        trace_id=sc.trace_id,
         extra={
-            "trace_id": sc.trace_id,
-            "review_issues": review_res.issues,
+            "debug": exec_res.debug,
         },
     )
 

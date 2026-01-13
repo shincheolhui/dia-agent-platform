@@ -80,6 +80,18 @@ def _get_uploaded_files(context: Any) -> List[Dict[str, Any]]:
     return v if isinstance(v, list) else []
 
 
+def _normalize_llm_meta(llm_res: Any, settings: Any) -> tuple[bool, str, Optional[str], Optional[str]]:
+    ok = bool(getattr(llm_res, "ok", False))
+    err = getattr(llm_res, "error", None)
+    model = getattr(llm_res, "model", None) or getattr(settings, "PRIMARY_MODEL", None)
+
+    if ok:
+        return True, "ok", None, model
+    if err in ("llm_disabled", "missing_api_key"):
+        return False, "skipped", err, model
+    return False, "failed", (err or "llm_call_failed"), model
+
+
 def _plan(sc: StageContext) -> tuple[Plan, List[AgentEvent]]:
     events: List[AgentEvent] = []
     events.append(step_start("planner", "요청 해석 및 작업 분해 시작"))
@@ -135,7 +147,7 @@ async def _execute(sc: StageContext, plan: Plan) -> tuple[ExecutionResult, List[
     # 1) 파일 우선
     if uploaded_files:
         f0 = uploaded_files[0]
-        name, path = _file_name_and_path(f0)
+        name, path, ext, mime = _file_name_and_path(f0)
 
         load_res = load_file(path)
         ok = bool(getattr(load_res, "ok", False))
@@ -200,16 +212,12 @@ async def _execute(sc: StageContext, plan: Plan) -> tuple[ExecutionResult, List[
     )
 
     llm_res = await llm_client.generate(system_prompt=system_prompt, user_prompt=user_prompt)
-
-    llm_used = False
-    body = ""
-
+    llm_used, llm_status, llm_reason, llm_model = _normalize_llm_meta(llm_res, sc.settings)
     llm_hint_line = ""
     llm_debug_line = ""
     error_code: Optional[str] = None
 
-    if llm_res.ok:
-        llm_used = True
+    if llm_used:
         events.append(info("executor.llm.used", "LLM 인사이트 생성 완료"))
         body = llm_res.content
         llm_hint_line = "- LLM: 적용됨"
@@ -226,12 +234,6 @@ async def _execute(sc: StageContext, plan: Plan) -> tuple[ExecutionResult, List[
             llm_hint_line = "- LLM: 미적용 (API Key 미설정)"
         else:
             llm_hint_line = "- LLM: 미적용 (호출 실패)"
-
-        if llm_res.last_error:
-            llm_debug_line = (
-                "\n\n<details><summary>LLM debug</summary>\n\n"
-                f"- last_error: {llm_res.last_error}\n\n</details>\n"
-            )
 
     report = (
         "# LogCop 분석 보고서\n\n"
@@ -258,7 +260,14 @@ async def _execute(sc: StageContext, plan: Plan) -> tuple[ExecutionResult, List[
         llm_used=llm_used,
         file_kind=file_kind,
         error_code=error_code,
-        debug={},
+        llm_status=llm_status,
+        llm_reason=llm_reason,
+        llm_model=llm_model,
+        debug={
+            "loader_kind": file_kind,
+            "loader_summary": summary,
+            "llm_last_error": getattr(llm_res, "last_error", None),
+        },
     )
     return exec_res, events
 
@@ -357,15 +366,20 @@ async def run_logcop(user_message: str, context: Dict[str, Any], settings: Any) 
 
     meta = build_agent_meta(
         agent_id="logcop",
-        mode="p2-2-a",
+        mode="p2-2-c",
         file_kind=exec_res.file_kind,
         llm_used=exec_res.llm_used,
         artifacts_count=len(all_artifacts),
         approved=review_res.approved,
         error_code=exec_res.error_code,
+        llm_status=exec_res.llm_status,
+        llm_reason=exec_res.llm_reason,
+        llm_model=exec_res.llm_model,
+        review_issues=review_res.issues,
+        review_followups=review_res.followups,
+        trace_id=sc.trace_id,
         extra={
-            "trace_id": sc.trace_id,
-            "review_issues": review_res.issues,
+            "debug": exec_res.debug,
         },
     )
 
